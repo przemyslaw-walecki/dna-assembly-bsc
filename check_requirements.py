@@ -1,19 +1,19 @@
 import sys
-from doorstop.core import tree
+from doorstop.core.project import load
 
 REQUIRED_PREFIX = "SYS"
 REQUIRED_COVERAGE = 0.5
 VALID_TEST_STATUSES = {"implemented", "passed", "ok"}
 
 def main():
-    t = tree.build()
+    project = load()
 
-    doc = t.get_document(REQUIRED_PREFIX)
-    if not doc:
+    sys_doc = next((d for d in project.documents if d.prefix == REQUIRED_PREFIX), None)
+    if not sys_doc:
         print(f"ERROR: Document '{REQUIRED_PREFIX}' not found.", file=sys.stderr)
         sys.exit(1)
 
-    active_items = [item for item in doc.items if item.active]
+    active_items = [item for item in sys_doc.items if item.active]
     if not active_items:
         print(f"ERROR: No active items in document '{REQUIRED_PREFIX}'.", file=sys.stderr)
         sys.exit(1)
