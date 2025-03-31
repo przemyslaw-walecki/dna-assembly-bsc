@@ -163,7 +163,7 @@ doorstop unlink SW001 SYS001
 ```
 ---
 ## Przykłady użycia - integracja z CI/CD w GitHubie:
-Doorstop bardzo dobrze sprawdza się jako dosyć wszechstronne narzędzie umożliwiające integrację z różnymi zewnętrznymi systemami. Poniżej przykład integracji z CI/CD w GitHubie za pomocą skryptu w Pythonie w wersji Doorstop v1.2:
+Doorstop bardzo dobrze sprawdza się jako dosyć wszechstronne narzędzie umożliwiające integrację z różnymi zewnętrznymi systemami. Poniżej przykład integracji z CI/CD w GitHubie za pomocą skryptu w Pythonie w wersji Doorstop v1.1.2:
 Plik `check_requirements.py`
 ```python
 import sys
@@ -221,9 +221,9 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
-          python-version: 3.10
+          python-version: 3.12
       - name: Install dependencies
-        run: pip install doorstop
+        run: pip install doorstop==1.1.2
       - name: Check requirement coverage
         run: python check_requirements_tested.py
 
