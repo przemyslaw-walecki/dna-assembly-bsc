@@ -14,4 +14,4 @@ jobs:
       - name: Install dependencies
         run: pip install doorstop
       - name: Check requirement coverage
-        run: python check_requirements_tested.py
+        run: python check_requirements.py
