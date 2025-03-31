@@ -5,6 +5,8 @@ level: 1.0
 links: []
 normative: true
 ref: ''
-reviewed: VpSmnotoa3aiQc39Do8gRvjGxHN7FWp6yQZ0YEbF0wk=
+reviewed: MrcqcL-qadA-CRrxU13W6taEuHeSSLr_QtockDkxr4Y=
 test: ok
-text: ''
+text: |
+  This is test message
+uid: SYS001

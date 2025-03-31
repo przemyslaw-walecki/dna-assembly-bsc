@@ -1,7 +1,6 @@
 # Doorstop – Zarządzanie Wymaganiami Projektowymi
 
-Niniejszy dokument przedstawia kompletny proces tworzenia i zarządzania wymaganiami projektowymi z wykorzystaniem narzędzia **Doorstop**. Doorstop to narzędzie typu open source, które umożliwia definiowanie, organizowanie i śledzenie wymagań w formacie tekstowym (YAML/Markdown), co czyni je doskonałym wyborem dla zespołów projektowych pracujących w środowiskach kontrolowanych przez systemy kontroli wersji (np. Git).
-
+Niniejszy dokument przedstawia proces tworzenia i zarządzania wymaganiami projektowymi z wykorzystaniem narzędzia **Doorstop**. Doorstop to narzędzie typu open source, które umożliwia definiowanie, organizowanie i śledzenie wymagań w formacie tekstowym YAML.
 ---
 
 ## Instalacja Doorstop
@@ -34,7 +33,7 @@ Bez tego pliku Doorstop korzysta z wbudowanych ustawień, które zakładają:
 - rozszerzenie plików: `yml`
 - brak dodatkowych ustawień niestandardowych
 
-Aby uzyskać pełną kontrolę nad strukturą i sposobem działania narzędzia, należy utworzyć pli `.doorstop.yml`.
+Aby uzyskać pełną kontrolę nad strukturą i sposobem działania narzędzia, należy edytować plik `.doorstop.yml`.
 
 Przykładowa struktura:
 
@@ -45,7 +44,6 @@ paths:
   - SYS
   - SW
 encoding: utf-8
-offline: true
 verbose: true
 index_name: index
 ```
@@ -72,12 +70,12 @@ Każde wymaganie jest reprezentowane jako plik YAML. Poniżej opisano możliwe p
 | `test`       | ciąg znaków    | _(opcjonalne)_ Status testu – np. `implemented`, `untested`, `passed`, `failed`.        |
 | `file`       | ciąg znaków    | _(opcjonalne)_ Ścieżka do pliku powiązanego z wymaganiem (np. kod, test, dokument).     |
 | `notes`      | ciąg znaków    | _(opcjonalne)_ Dodatkowe uwagi, wyjaśnienia, wymagania nieformalnie opisane.            |
-| `ref`        | ciąg znaków lub lista | _(opcjonalne)_ Referencje zewnętrzne, np. normy, standardy (np. `ISO26262`, `RFC7519`), powiązane GitHub Issues |
+| `ref`        | ciąg znaków lub lista | _(opcjonalne)_ Referencje zewnętrzne, z innych plików w projekcie, Doorstop sam znajdzie ich lokacje |
 | `derived`    | logiczny       | _(opcjonalne)_ Czy wymaganie zostało pochodnie wygenerowane z innego (`true`/`false`).  |
 | `rationale`  | ciąg znaków    | _(opcjonalne)_ Uzasadnienie potrzeby danego wymagania.                                   |
 | `parent`     | ciąg znaków    | _(przestarzałe)_ Stare pole używane przed `links`, obecnie niezalecane.                 |
 
-### Dodatkowo, doorstop umożliwia podawanie dowolnych innych pól własnych, są one omijane przez silnik, ale mogą być używane przez inne narzędzia.
+Dodatkowo, doorstop umożliwia podawanie dowolnych innych pól własnych, są one omijane przez silnik, ale mogą być używane przez własne narzędzia.
 
 ### Doorstop umożliwia podstawowe zarządzanie wymaganiami:
 ```bash 
@@ -105,17 +103,24 @@ doorstop add SYS
 Przykładowa konfiguracja `docs/SYS/SYS002.yml`:
 
 ```yaml
-uid: SYS002
-text: System powinien przechowywać dane w bezpieczny sposób.
-level: 1
 active: true
-rationale: Ochrona danych użytkownika jest wymagana przez prawo oraz dobre praktyki bezpieczeństwa.
-ref:
-  - https://www.iso.org/isoiec-27001-information-security.html
-  - GDPR-ART32
-notes: Dotyczy zarówno danych osobowych, jak i danych systemowych przechowywanych lokalnie lub w chmurze.
+derived: false
 file: docs/specs/data-security.md
-test: untested
+header: |
+  To jest testowy Header
+level: 1.1
+links: []
+normative: true
+notes: |
+  'Dotyczy zarówno danych osobowych, jak i danych systemowych przechowywanych lokalnie lub w chmurze.'
+rationale: |
+  'Ochrona danych użytkownika jest wymagana przez prawo oraz dobre praktyki bezpieczeństwa.'
+ref: www.iso.org/isoiec-27001-information-security.html
+reviewed: n-1OZqmSlOe8UqIrKcueY-zYw-SFDmifkr9o1IS676A=
+test: ok
+text: |
+  System powinien przechowywać dane w bezpieczny sposób.
+uid: SYS002
 ```
 
 ---
@@ -142,6 +147,12 @@ links:
 active: true
 test: implemented
 ```
+## Walidacja struktury wymagań
+
+Aby sprawdzić poprawność struktury naszych wymagań, należy po prostu uruchomić:
+```bash
+doorstop
+```
 
 ---
 ## Eksportowanie wymagań 
@@ -153,12 +164,16 @@ prefix - nazwa dokumentu
 plik - ścieżka do pliku wyjściowego  
 format - specyfikacja formatu (y/c/t/x)
 
+Można również publikować dokumenty jako pliki html:
+```bash
+doorstop publish <prefix|all> [ścieżka]
+```
 ---
 
 ### Pozostałe komendy
 
 ```bash
-doorstop review <Nazwa> # Oznacza wymagania jako zrecenzowane przez <Nazwa>
+doorstop review <prefix|all> # Oznacza wymagania jako zrecenzowane - zostaje ustawiony unikatowy klucz SHA-256 na podstawie treści wymagania
 doorstop unlink SW001 SYS001
 ```
 ---
@@ -283,3 +298,7 @@ doorstop-server # Domyślnie uruchamia na localhost:7867
 | `GET`    | `/export/markdown`               | Eksportuje dokumentację w formacie Markdown.                        |
 | `GET`    | `/export/html`                   | Eksportuje dokumentację w formacie HTML (jeśli obsługiwane).        |
 | `GET`    | `/export/pdf`                    | Eksportuje dokumentację do PDF (jeśli zintegrowano Pandoc/LaTeX).   |
+
+### Źródła
+https://github.com/doorstop-dev/doorstop
+https://doorstop.readthedocs.io/en/latest/

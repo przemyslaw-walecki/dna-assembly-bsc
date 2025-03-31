@@ -104,17 +104,24 @@ doorstop add SYS
 Przykładowa konfiguracja `docs/SYS/SYS002.yml`:
 
 ```yaml
-uid: SYS002
-text: System powinien przechowywać dane w bezpieczny sposób.
-level: 1
 active: true
-rationale: Ochrona danych użytkownika jest wymagana przez prawo oraz dobre praktyki bezpieczeństwa.
-ref:
-  - https://www.iso.org/isoiec-27001-information-security.html
-  - GDPR-ART32
-notes: Dotyczy zarówno danych osobowych, jak i danych systemowych przechowywanych lokalnie lub w chmurze.
+derived: false
 file: docs/specs/data-security.md
-test: untested
+header: |
+  To jest testowy Header
+level: 1.1
+links: []
+normative: true
+notes: |
+  'Dotyczy zarówno danych osobowych, jak i danych systemowych przechowywanych lokalnie lub w chmurze.'
+rationale: |
+  'Ochrona danych użytkownika jest wymagana przez prawo oraz dobre praktyki bezpieczeństwa.'
+ref: www.iso.org/isoiec-27001-information-security.html
+reviewed: n-1OZqmSlOe8UqIrKcueY-zYw-SFDmifkr9o1IS676A=
+test: ok
+text: |
+  System powinien przechowywać dane w bezpieczny sposób.
+uid: SYS002
 ```
 
 ---
@@ -141,6 +148,12 @@ links:
 active: true
 test: implemented
 ```
+## Walidacja struktury wymagań
+
+Aby sprawdzić poprawność struktury naszych wymagań, należy po prostu uruchomić:
+```bash
+doorstop
+```
 
 ---
 ## Eksportowanie wymagań 
@@ -152,12 +165,16 @@ prefix - nazwa dokumentu
 plik - ścieżka do pliku wyjściowego  
 format - specyfikacja formatu (y/c/t/x)
 
+Można również publikować dokumenty jako pliki html:
+```bash
+doorstop publish <prefix|all> [ścieżka]
+```
 ---
 
 ### Pozostałe komendy
 
 ```bash
-doorstop review <Nazwa|Grupa|All> # Oznacza wymagania jako zrecenzowane - zostaje ustawiony unikatowy klucz SHA-256 na podstawie treści wymagania
+doorstop review <prefix|all> # Oznacza wymagania jako zrecenzowane - zostaje ustawiony unikatowy klucz SHA-256 na podstawie treści wymagania
 doorstop unlink SW001 SYS001
 ```
 ---
@@ -282,3 +299,7 @@ doorstop-server # Domyślnie uruchamia na localhost:7867
 | `GET`    | `/export/markdown`               | Eksportuje dokumentację w formacie Markdown.                        |
 | `GET`    | `/export/html`                   | Eksportuje dokumentację w formacie HTML (jeśli obsługiwane).        |
 | `GET`    | `/export/pdf`                    | Eksportuje dokumentację do PDF (jeśli zintegrowano Pandoc/LaTeX).   |
+
+### Źródła
+https://github.com/doorstop-dev/doorstop
+https://doorstop.readthedocs.io/en/latest/

@@ -1,10 +1,17 @@
 active: true
 derived: false
-header: ''
+header: |
+  To jest testowy Header
 level: 1.1
 links: []
 normative: true
+notes: |
+  'Dotyczy zarówno danych osobowych, jak i danych systemowych przechowywanych lokalnie lub w chmurze.'
+rationale: |
+  'Ochrona danych użytkownika jest wymagana przez prawo oraz dobre praktyki bezpieczeństwa.'
 ref: ''
-reviewed: VCHGOgoShL3ym8b0lrj0LW-lj8sBVT4NFspO0fPSfXE=
+reviewed: h9WG7Vm0YYqO_UD1W9Kqyn51YXoYNowPM8vvh9_otMc=
 test: ok
-text: ''
+text: |
+  System powinien przechowywać dane w bezpieczny sposób.
+uid: SYS002
