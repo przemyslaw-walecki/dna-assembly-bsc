@@ -12,6 +12,6 @@ jobs:
         with:
           python-version: 3.12
       - name: Install dependencies
-        run: pip install doorstop==1.1.2
+        run: pip install doorstop==1.2
       - name: Check requirement coverage
         run: python check_requirements.py
