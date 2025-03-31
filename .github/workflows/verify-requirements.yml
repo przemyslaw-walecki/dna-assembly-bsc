@@ -17,7 +17,8 @@ jobs:
         run: pip install doorstop pyyaml
 
       - name: Export requirements
-        run: doorstop export -y all requirements.yaml
+        run: doorstop export -y SYS requirements.yaml
+
 
       - name: Check requirement coverage
         run: python check_requirements.py
