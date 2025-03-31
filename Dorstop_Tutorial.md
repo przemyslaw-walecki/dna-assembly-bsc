@@ -1,7 +1,6 @@
 # Doorstop – Zarządzanie Wymaganiami Projektowymi
 
-Niniejszy dokument przedstawia kompletny proces tworzenia i zarządzania wymaganiami projektowymi z wykorzystaniem narzędzia **Doorstop**. Doorstop to narzędzie typu open source, które umożliwia definiowanie, organizowanie i śledzenie wymagań w formacie tekstowym (YAML/Markdown), co czyni je doskonałym wyborem dla zespołów projektowych pracujących w środowiskach kontrolowanych przez systemy kontroli wersji (np. Git).
-
+Niniejszy dokument przedstawia proces tworzenia i zarządzania wymaganiami projektowymi z wykorzystaniem narzędzia **Doorstop**. Doorstop to narzędzie typu open source, które umożliwia definiowanie, organizowanie i śledzenie wymagań w formacie tekstowym YAML.
 ---
 
 ## Instalacja Doorstop
@@ -34,7 +33,7 @@ Bez tego pliku Doorstop korzysta z wbudowanych ustawień, które zakładają:
 - rozszerzenie plików: `yml`
 - brak dodatkowych ustawień niestandardowych
 
-Aby uzyskać pełną kontrolę nad strukturą i sposobem działania narzędzia, należy utworzyć pli `.doorstop.yml`.
+Aby uzyskać pełną kontrolę nad strukturą i sposobem działania narzędzia, należy utworzyć plik `.doorstop.yml`.
 
 Przykładowa struktura:
 
@@ -77,7 +76,7 @@ Każde wymaganie jest reprezentowane jako plik YAML. Poniżej opisano możliwe p
 | `rationale`  | ciąg znaków    | _(opcjonalne)_ Uzasadnienie potrzeby danego wymagania.                                   |
 | `parent`     | ciąg znaków    | _(przestarzałe)_ Stare pole używane przed `links`, obecnie niezalecane.                 |
 
-### Dodatkowo, doorstop umożliwia podawanie dowolnych innych pól własnych, są one omijane przez silnik, ale mogą być używane przez inne narzędzia.
+Dodatkowo, doorstop umożliwia podawanie dowolnych innych pól własnych, są one omijane przez silnik, ale mogą być używane przez własne narzędzia.
 
 ### Doorstop umożliwia podstawowe zarządzanie wymaganiami:
 ```bash 
@@ -158,7 +157,7 @@ format - specyfikacja formatu (y/c/t/x)
 ### Pozostałe komendy
 
 ```bash
-doorstop review <Nazwa> # Oznacza wymagania jako zrecenzowane przez <Nazwa>
+doorstop review <Nazwa|Grupa|All> # Oznacza wymagania jako zrecenzowane - zostaje ustawiony unikatowy klucz SHA-256 na podstawie treści wymagania
 doorstop unlink SW001 SYS001
 ```
 ---
