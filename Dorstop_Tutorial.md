@@ -163,36 +163,40 @@ doorstop unlink SW001 SYS001
 ```
 ---
 ## Przykłady użycia - integracja z CI/CD w GitHubie:
-Doorstop bardzo dobrze sprawdza się jako dosyć wszechstronne narzędzie umożliwiające integrację z różnymi zewnętrznymi systemami. Poniżej przykład integracji z CI/CD w GitHubie za pomocą skryptu w Pythonie w wersji Doorstop v1.1.2:
+Doorstop bardzo dobrze sprawdza się jako dosyć wszechstronne narzędzie umożliwiające integrację z różnymi zewnętrznymi systemami. Poniżej przykład integracji z CI/CD w GitHubie za pomocą skryptu w Pythonie:
 Plik `check_requirements.py`
 ```python
 import sys
-from doorstop.core import tree
+import yaml
 
+EXPORT_FILE = "requirements.yaml"
 REQUIRED_PREFIX = "SYS"
 REQUIRED_COVERAGE = 0.5
 VALID_TEST_STATUSES = {"implemented", "passed", "ok"}
 
 def main():
-    t = tree.build()
+    with open(EXPORT_FILE, "r", encoding="utf-8") as f:
+        data = yaml.safe_load(f)
 
-    doc = t.get_document(REQUIRED_PREFIX)
-    if not doc:
-        print(f"ERROR: Document '{REQUIRED_PREFIX}' not found.", file=sys.stderr)
+    if not data:
+        print("ERROR: Exported YAML is empty or invalid.", file=sys.stderr)
         sys.exit(1)
 
-    active_items = [item for item in doc.items if item.active]
-    if not active_items:
-        print(f"ERROR: No active items in document '{REQUIRED_PREFIX}'.", file=sys.stderr)
-        sys.exit(1)
-
-    tested_items = [
-        item for item in active_items
-        if isinstance(item.test, str) and item.test.lower() in VALID_TEST_STATUSES
+    relevant_items = [
+        item for uid, item in data.items()
+        if uid.startswith(REQUIRED_PREFIX) and item.get("active", True)
     ]
 
-    total = len(active_items)
-    tested = len(tested_items)
+    if not relevant_items:
+        print(f"ERROR: No active requirements with prefix '{REQUIRED_PREFIX}'.", file=sys.stderr)
+        sys.exit(1)
+
+    tested = sum(
+        1 for item in relevant_items
+        if isinstance(item.get("test"), str) and item["test"].lower() in VALID_TEST_STATUSES
+    )
+
+    total = len(relevant_items)
     coverage = tested / total
 
     print(f"{REQUIRED_PREFIX} coverage: {tested}/{total} ({coverage:.1%})")
@@ -206,6 +210,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 ```
 Plik `.github/workflows/verify_requirements.yml`
 ```yaml
@@ -218,14 +223,21 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
+
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
-          python-version: 3.12
+          python-version: '3.10'
+
       - name: Install dependencies
-        run: pip install doorstop==1.1.2
+        run: pip install doorstop pyyaml
+
+      - name: Export requirements
+        run: doorstop export -y SYS requirements.yaml
+
+
       - name: Check requirement coverage
-        run: python check_requirements_tested.py
+        run: python check_requirements.py
 
 ```
 
