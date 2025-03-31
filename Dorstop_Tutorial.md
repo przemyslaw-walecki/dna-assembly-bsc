@@ -33,7 +33,7 @@ Bez tego pliku Doorstop korzysta z wbudowanych ustawień, które zakładają:
 - rozszerzenie plików: `yml`
 - brak dodatkowych ustawień niestandardowych
 
-Aby uzyskać pełną kontrolę nad strukturą i sposobem działania narzędzia, należy utworzyć plik `.doorstop.yml`.
+Aby uzyskać pełną kontrolę nad strukturą i sposobem działania narzędzia, należy edytować plik `.doorstop.yml`.
 
 Przykładowa struktura:
 
@@ -44,7 +44,6 @@ paths:
   - SYS
   - SW
 encoding: utf-8
-offline: true
 verbose: true
 index_name: index
 ```
@@ -71,7 +70,7 @@ Każde wymaganie jest reprezentowane jako plik YAML. Poniżej opisano możliwe p
 | `test`       | ciąg znaków    | _(opcjonalne)_ Status testu – np. `implemented`, `untested`, `passed`, `failed`.        |
 | `file`       | ciąg znaków    | _(opcjonalne)_ Ścieżka do pliku powiązanego z wymaganiem (np. kod, test, dokument).     |
 | `notes`      | ciąg znaków    | _(opcjonalne)_ Dodatkowe uwagi, wyjaśnienia, wymagania nieformalnie opisane.            |
-| `ref`        | ciąg znaków lub lista | _(opcjonalne)_ Referencje zewnętrzne, np. normy, standardy (np. `ISO26262`, `RFC7519`), powiązane GitHub Issues |
+| `ref`        | ciąg znaków lub lista | _(opcjonalne)_ Referencje zewnętrzne, z innych plików w projekcie, Doorstop sam znajdzie ich lokacje |
 | `derived`    | logiczny       | _(opcjonalne)_ Czy wymaganie zostało pochodnie wygenerowane z innego (`true`/`false`).  |
 | `rationale`  | ciąg znaków    | _(opcjonalne)_ Uzasadnienie potrzeby danego wymagania.                                   |
 | `parent`     | ciąg znaków    | _(przestarzałe)_ Stare pole używane przed `links`, obecnie niezalecane.                 |
