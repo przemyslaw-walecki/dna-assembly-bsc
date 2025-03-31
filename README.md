@@ -264,7 +264,7 @@ Przykładowe komendy dostępne w v1.x, w tym różnice implementacji:
 |                           | `doorstop list --{active/inactive}` - status  |
 
 ## Serwer Doorstop
-Możliwe było wystawienie lokalnego API do zarządzania wymaganiami przez zapytania REST. Funkcjonalność została usunięta w v3.0.
+Możliwe było wystawienie lokalnego API do zarządzania wymaganiami przez zapytania REST. Funkcjonalność raczej eksperymentalna, brak wsparcia.
 ```bash 
 doorstop-server # Domyślnie uruchamia na localhost:7867
 ```
