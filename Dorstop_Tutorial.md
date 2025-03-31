@@ -1,6 +1,6 @@
 # Doorstop – Zarządzanie Wymaganiami Projektowymi
 
-Niniejszy dokument przedstawia proces tworzenia i zarządzania wymaganiami projektowymi z wykorzystaniem narzędzia **Doorstop**. Doorstop to narzędzie typu open source, które umożliwia definiowanie, organizowanie i śledzenie wymagań w formacie tekstowym YAML.
+Doorstop to narzędzie typu open source, które umożliwia definiowanie, organizowanie i śledzenie wymagań w formacie tekstowym YAML.
 ---
 
 ## Instalacja Doorstop
