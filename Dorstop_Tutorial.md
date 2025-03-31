@@ -25,15 +25,13 @@ mkdir docs
 ---
 ## Plik konfiguracyjny `.doorstop.yml`
 
-W wersji Doorstop v3.0 plik `.doorstop.yml` **nie jest tworzony automatycznie**.
-
-Bez tego pliku Doorstop korzysta z wbudowanych ustawień, które zakładają:
+W wersji v3.0 Doorstop korzysta z wbudowanych ustawień, które zakładają:
 
 - katalog z dokumentami: `docs/`
 - rozszerzenie plików: `yml`
 - brak dodatkowych ustawień niestandardowych
 
-Aby uzyskać pełną kontrolę nad strukturą i sposobem działania narzędzia, należy edytować plik `.doorstop.yml`.
+Aby uzyskać pełną kontrolę nad strukturą i sposobem działania narzędzia, należy edytować plik `.doorstop.yml` wewnątrz folderu dokumentu.
 
 Przykładowa struktura:
 
