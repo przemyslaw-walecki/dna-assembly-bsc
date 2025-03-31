@@ -36,14 +36,12 @@ Aby uzyskać pełną kontrolę nad strukturą i sposobem działania narzędzia, 
 Przykładowa struktura:
 
 ```yaml
-repo: docs
-ext: yml
-paths:
-  - SYS
-  - SW
-encoding: utf-8
-verbose: true
-index_name: index
+settings:
+  digits: 3
+  itemformat: yaml
+  parent: SYS
+  prefix: SW
+  sep: ''
 ```
 ---
 
