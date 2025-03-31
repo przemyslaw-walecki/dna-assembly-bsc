@@ -1,42 +1,26 @@
 import sys
-import subprocess
-import yaml
+from doorstop.core import tree
 
 REQUIRED_PREFIX = "SYS"
 REQUIRED_COVERAGE = 0.5
 VALID_TEST_STATUSES = {"implemented", "passed", "ok"}
 
-
-def load_exported_yaml(prefix: str):
-    try:
-        result = subprocess.run(
-            ["doorstop", "export", prefix, "-y"],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            check=True,
-            encoding="utf-8"
-        )
-        return yaml.safe_load(result.stdout)
-    except subprocess.CalledProcessError as e:
-        print(f"ERROR: Failed to export document '{prefix}':\n{e.stderr}", file=sys.stderr)
-        sys.exit(1)
-
-
 def main():
-    data = load_exported_yaml(REQUIRED_PREFIX)
+    t = tree.build()
 
-    if not isinstance(data, list):
-        print(f"ERROR: Exported data for '{REQUIRED_PREFIX}' is not a list.", file=sys.stderr)
+    doc = t.get_document(REQUIRED_PREFIX)
+    if not doc:
+        print(f"ERROR: Document '{REQUIRED_PREFIX}' not found.", file=sys.stderr)
         sys.exit(1)
 
-    active_items = [item for item in data if item.get("active") is True]
+    active_items = [item for item in doc.items if item.active]
     if not active_items:
-        print(f"ERROR: No active items found in document '{REQUIRED_PREFIX}'.", file=sys.stderr)
+        print(f"ERROR: No active items in document '{REQUIRED_PREFIX}'.", file=sys.stderr)
         sys.exit(1)
 
     tested_items = [
         item for item in active_items
-        if str(item.get("test", "")).lower() in VALID_TEST_STATUSES
+        if isinstance(item.test, str) and item.test.lower() in VALID_TEST_STATUSES
     ]
 
     total = len(active_items)
@@ -51,7 +35,6 @@ def main():
 
     print("SUCCESS: Requirement test coverage OK.")
     sys.exit(0)
-
 
 if __name__ == "__main__":
     main()
