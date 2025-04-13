@@ -1,0 +1,11 @@
+active: true
+derived: false
+header: ''
+level: 2.0
+links: []
+normative: true
+ref: Authenticator
+reviewed: fRBHflsEHOx11nnlH-biH0j4Cls5DLXjXIm3cG-wvZg=
+text: |
+  Logowanie powinno odbywać się z czasem odpowiedzi poniżej 500ms.
+uid: WF002

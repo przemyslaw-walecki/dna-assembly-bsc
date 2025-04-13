@@ -1,0 +1,12 @@
+active: true
+derived: false
+header: ''
+level: 1.0
+links:
+- WF001: uMYtrrGresKU4sLxHaHzH6n-vj7K1_pcAX7fPpIfqGQ=
+normative: true
+ref: test_login_success
+reviewed: PnYTcj2bRzCGgjvKVs_4-yEzG7qNfxg-27H_tR8up-E=
+text: |
+  Test logowania użytkownika z prawidłowymi danymi.
+uid: WT001

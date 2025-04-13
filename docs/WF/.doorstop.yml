@@ -1,5 +1,5 @@
 settings:
   digits: 3
   itemformat: yaml
-  prefix: SYS
+  prefix: WF
   sep: ''

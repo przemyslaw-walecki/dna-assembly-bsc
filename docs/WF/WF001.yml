@@ -1,0 +1,11 @@
+active: true
+derived: false
+header: ''
+level: 1.0
+links: []
+normative: true
+ref: Authenticator
+reviewed: uMYtrrGresKU4sLxHaHzH6n-vj7K1_pcAX7fPpIfqGQ=
+text: |
+  System powinien umożliwić logowanie użytkownika.
+uid: WF001
