@@ -253,48 +253,49 @@ jobs:
 ```
 
 ---
+## Struktura wymagań: podział na WF i WT
 
-## Poprzednie wersje:
+W celu uporządkowanego zarządzania wymaganiami w projekcie, zastosowano dwupoziomowy podział:
 
-Doorstop v1.x udostępniał znacznie więcej funkcji do zarządzania i nadzorowania wymagań.  
-Większość z nich zaczęła być uznawana za przestarzała i przesuwana do zewnętrznych pluginów w wersji v2.0.
+| Typ dokumentu | Opis                                                                 |
+|---------------|----------------------------------------------------------------------|
+| **WF**        | Wymagania funkcjonalne. Opisują, co system powinien robić.           |
+| **WT**        | Wymagania testowe. Określają sposób weryfikacji spełnienia wymagań. |
 
-Przykładowe komendy dostępne w v1.x, w tym różnice implementacji:
+Doorstop umożliwia reprezentowanie wymagań jako elementów powiązanych ze sobą poprzez relacje nadrzędny–podrzędny lub wiele-do-wielu (graf wymagań).
 
-| Funkcja                  | Komenda lub plik                      |
-|--------------------------|----------------------------------------|
-| Inicjalizacja            | `doorstop create`                     |
-| Dodanie dokumentu        | `doorstop create SYS`                 |
-| Dodanie wymagania        | `doorstop add SYS`                    |
-| Tworzenie powiązań       | `doorstop create SW -p SYS`           |
-| Drzewo wymagań           | `doorstop tree`                       |
-| Walidacja struktury wymagań           | `doorstop verify`       |
-| Eksport                  | `doorstop export --format markdown`   |
-| Szukanie                 | `doorstop find {--pole} {wartosc1} {wartosc2}`                 |
-| Filtrowanie              | `doorstop list {--pole} {wartość}` 
-|                           | `doorstop list --{active/inactive}` - status  |
+### Przykład
 
-## Serwer Doorstop
-Możliwe było wystawienie lokalnego API do zarządzania wymaganiami przez zapytania REST. Funkcjonalność raczej eksperymentalna, brak wsparcia.
-```bash 
-doorstop-server # Domyślnie uruchamia na localhost:7867
+#### WF001 – Logowanie do systemu
+```yaml
+active: true
+derived: false
+header: ''
+level: 1.0
+links: []
+normative: true
+ref: Authenticator
+reviewed: uMYtrrGresKU4sLxHaHzH6n-vj7K1_pcAX7fPpIfqGQ=
+text: |
+  System powinien umożliwić logowanie użytkownika.
+uid: WF001
 ```
 
-
-| Metoda   | Endpoint                         | Opis                                                                 |
-|----------|----------------------------------|----------------------------------------------------------------------|
-| `GET`    | `/docs`                          | Zwraca listę wszystkich dokumentów (np. `SYS`, `SW`).               |
-| `GET`    | `/docs/<prefix>`                 | Zwraca metadane dokumentu (np. `index.yml` dla `SYS`).              |
-| `GET`    | `/items`                         | Zwraca listę wszystkich wymagań ze wszystkich dokumentów.           |
-| `GET`    | `/items/<uid>`                   | Zwraca szczegóły konkretnego wymagania.                             |
-| `POST`   | `/items/<uid>`                   | Tworzy lub aktualizuje wymaganie (JSON w `body`).                   |
-| `DELETE` | `/items/<uid>`                   | Usuwa wymaganie (jeśli obsługiwane przez wersję serwera).           |
-| `GET`    | `/tree`                          | Zwraca strukturę drzewa powiązań między dokumentami.                |
-| `GET`    | `/verify`                        | Weryfikuje poprawność powiązań i kompletność wymagań (jeśli dostępne). |
-| `GET`    | `/export/markdown`               | Eksportuje dokumentację w formacie Markdown.                        |
-| `GET`    | `/export/html`                   | Eksportuje dokumentację w formacie HTML (jeśli obsługiwane).        |
-| `GET`    | `/export/pdf`                    | Eksportuje dokumentację do PDF (jeśli zintegrowano Pandoc/LaTeX).   |
-
+#### WT001 - Testowanie logowania do systemu
+```yaml
+active: true
+derived: false
+header: ''
+level: 1.0
+links:
+- WF001: uMYtrrGresKU4sLxHaHzH6n-vj7K1_pcAX7fPpIfqGQ=
+normative: true
+ref: test_login_success
+reviewed: PnYTcj2bRzCGgjvKVs_4-yEzG7qNfxg-27H_tR8up-E=
+text: |
+  Test logowania użytkownika z prawidłowymi danymi.
+uid: WT001
+```
 ### Źródła
 https://github.com/doorstop-dev/doorstop
 https://doorstop.readthedocs.io/en/latest/

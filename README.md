@@ -1,6 +1,6 @@
 # Doorstop – Zarządzanie Wymaganiami Projektowymi
 
-Niniejszy dokument przedstawia proces tworzenia i zarządzania wymaganiami projektowymi z wykorzystaniem narzędzia **Doorstop**. Doorstop to narzędzie typu open source, które umożliwia definiowanie, organizowanie i śledzenie wymagań w formacie tekstowym YAML.
+Doorstop to narzędzie typu open source, które umożliwia definiowanie, organizowanie i śledzenie wymagań w formacie tekstowym YAML.
 ---
 
 ## Instalacja Doorstop
@@ -25,27 +25,23 @@ mkdir docs
 ---
 ## Plik konfiguracyjny `.doorstop.yml`
 
-W wersji Doorstop v3.0 plik `.doorstop.yml` **nie jest tworzony automatycznie**.
-
-Bez tego pliku Doorstop korzysta z wbudowanych ustawień, które zakładają:
+W wersji v3.0 Doorstop korzysta z wbudowanych ustawień, które zakładają:
 
 - katalog z dokumentami: `docs/`
 - rozszerzenie plików: `yml`
 - brak dodatkowych ustawień niestandardowych
 
-Aby uzyskać pełną kontrolę nad strukturą i sposobem działania narzędzia, należy edytować plik `.doorstop.yml`.
+Aby uzyskać pełną kontrolę nad strukturą i sposobem działania narzędzia, należy edytować plik `.doorstop.yml` wewnątrz folderu dokumentu.
 
 Przykładowa struktura:
 
 ```yaml
-repo: docs
-ext: yml
-paths:
-  - SYS
-  - SW
-encoding: utf-8
-verbose: true
-index_name: index
+settings:
+  digits: 3
+  itemformat: yaml
+  parent: SYS
+  prefix: SW
+  sep: ''
 ```
 ---
 
@@ -257,4 +253,49 @@ jobs:
 ```
 
 ---
+## Struktura wymagań: podział na WF i WT
 
+W celu uporządkowanego zarządzania wymaganiami w projekcie, zastosowano dwupoziomowy podział:
+
+| Typ dokumentu | Opis                                                                 |
+|---------------|----------------------------------------------------------------------|
+| **WF**        | Wymagania funkcjonalne. Opisują, co system powinien robić.           |
+| **WT**        | Wymagania testowe. Określają sposób weryfikacji spełnienia wymagań. |
+
+Doorstop umożliwia reprezentowanie wymagań jako elementów powiązanych ze sobą poprzez relacje nadrzędny–podrzędny lub wiele-do-wielu (graf wymagań).
+
+### Przykład
+
+#### WF001 – Logowanie do systemu
+```yaml
+active: true
+derived: false
+header: ''
+level: 1.0
+links: []
+normative: true
+ref: Authenticator
+reviewed: uMYtrrGresKU4sLxHaHzH6n-vj7K1_pcAX7fPpIfqGQ=
+text: |
+  System powinien umożliwić logowanie użytkownika.
+uid: WF001
+```
+
+#### WT001 - Testowanie logowania do systemu
+```yaml
+active: true
+derived: false
+header: ''
+level: 1.0
+links:
+- WF001: uMYtrrGresKU4sLxHaHzH6n-vj7K1_pcAX7fPpIfqGQ=
+normative: true
+ref: test_login_success
+reviewed: PnYTcj2bRzCGgjvKVs_4-yEzG7qNfxg-27H_tR8up-E=
+text: |
+  Test logowania użytkownika z prawidłowymi danymi.
+uid: WT001
+```
+### Źródła
+https://github.com/doorstop-dev/doorstop
+https://doorstop.readthedocs.io/en/latest/
