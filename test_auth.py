@@ -1,6 +1,10 @@
 import unittest
 from auth import Authenticator
 
+
+class Authenticator:
+    pass
+
 class TestAuthenticator(unittest.TestCase):
     def setUp(self):
         self.auth = Authenticator({"user": "pass"})

@@ -39,30 +39,41 @@ Przykładowa struktura:
 settings:
   digits: 3
   itemformat: yaml
-  parent: SYS
-  prefix: SW
+  parent: WT
+  prefix: WF
   sep: ''
 ```
 ---
 
-## Tworzenie dokumentu z wymaganiami systemowymi (SYS)
+## Struktura wymagań: podział na WF i WT
 
-Wymagania systemowe reprezentują ogólne cele i założenia projektu.
+W ramach poniższego dokumentu zastosowano dwupoziomowy podział:
+
+| Typ dokumentu | Opis                                                                 |
+|---------------|----------------------------------------------------------------------|
+| **WF**        | Wymagania funkcjonalne. Opisują, co system powinien robić.           |
+| **WT**        | Wymagania testowe. Określają sposób weryfikacji spełnienia wymagań. |
+
+Doorstop umożliwia reprezentowanie wymagań jako elementów powiązanych ze sobą poprzez relacje nadrzędny–podrzędny lub wiele-do-wielu (graf wymagań).
+
+
+## Tworzenie dokumentu z wymaganiami funkcjonalnymi (WF)
+
+Wymagania funkcjonalne reprezentują poszczególne funkcjonalości systemu.
 
 ```bash
-doorstop create SYS docs/SYS # doorstop create {nazwa} {folder_na_wymagania}
-doorstop add SYS # Dostępne dodatkowe flagi: [-c ilość wymagań] [--file plik_wejściowy] [--template własny_template]  
+doorstop create WF docs/WF # doorstop create {nazwa} {folder_na_wymagania}
+doorstop add WF # Dostępne dodatkowe flagi: [-c ilość wymagań] [--file plik_wejściowy] [--template własny_template]  
 ```
-
 Każde wymaganie jest reprezentowane jako plik YAML. Poniżej opisano możliwe pola w pliku wymagań:
 
 | Pole         | Typ           | Opis                                                                                     |
 |--------------|----------------|------------------------------------------------------------------------------------------|
-| `uid`        | ciąg znaków    | Unikalny identyfikator wymogu (np. `SYS001`, `SW003`).                                  |
+| `uid`        | ciąg znaków    | Unikalny identyfikator wymogu (np. `WF001`, `WT003`).                                  |
 | `text`       | ciąg znaków    | Treść wymagania w języku naturalnym – opisuje oczekiwane zachowanie/system.             |
 | `level`      | liczba         | Poziom wymagania – 1 = ogólne, wysokopoziomowe, 2+ = coraz bardziej szczegółowe.         |
 | `active`     | logiczny       | Czy wymaganie jest aktywne (`true`) czy nieaktywne (`false`).                            |
-| `links`      | lista          | _(opcjonalne)_ Lista identyfikatorów powiązanych wymagań nadrzędnych (np. `SYS001`).    |
+| `links`      | lista          | _(opcjonalne)_ Lista identyfikatorów powiązanych wymagań nadrzędnych (np. `WF001`).    |
 | `test`       | ciąg znaków    | _(opcjonalne)_ Status testu – np. `implemented`, `untested`, `passed`, `failed`.        |
 | `file`       | ciąg znaków    | _(opcjonalne)_ Ścieżka do pliku powiązanego z wymaganiem (np. kod, test, dokument).     |
 | `notes`      | ciąg znaków    | _(opcjonalne)_ Dodatkowe uwagi, wyjaśnienia, wymagania nieformalnie opisane.            |
@@ -75,49 +86,34 @@ Dodatkowo, doorstop umożliwia podawanie dowolnych innych pól własnych, są on
 
 ### Doorstop umożliwia podstawowe zarządzanie wymaganiami:
 ```bash 
-doorstop edit SYS001 # Otwiera plik yaml w domyślnym edytorze
-doorstop remove SYS002
-doorstop reorder SW # Uporządkowanie UID, np po remove
+doorstop edit WF001 # Otwiera plik yaml w domyślnym edytorze
+doorstop remove WF002
+doorstop reorder WF # Uporządkowanie UID, np po remove
 ```
 ---
 
-Przykładowy plik `docs/SYS/SYS001.yml`:
+Przykładowy plik `docs/WF/WF001.yml`:
 
 ```yaml
-uid: SYS001
-text: System powinien obsługiwać uwierzytelnianie użytkownika.
-level: 1
 active: true
+derived: false
+header: ''
+level: 1.0
+links: []
+normative: true
+ref: Aut
+reviewed: uMYtrrGresKU4sLxHaHzH6n-vj7K1_pcAX7fPpIfqGQ=
+text: |
+  System powinien umożliwić logowanie użytkownika.
+uid: WF001
 ```
 
 Dodanie kolejnego wymagania:
 
 ```bash
-doorstop add SYS
+doorstop add WF
 ```
-
-Przykładowa konfiguracja `docs/SYS/SYS002.yml`:
-
-```yaml
-active: true
-derived: false
-file: docs/specs/data-security.md
-header: |
-  To jest testowy Header
-level: 1.1
-links: []
-normative: true
-notes: |
-  'Dotyczy zarówno danych osobowych, jak i danych systemowych przechowywanych lokalnie lub w chmurze.'
-rationale: |
-  'Ochrona danych użytkownika jest wymagana przez prawo oraz dobre praktyki bezpieczeństwa.'
-ref: www.iso.org/isoiec-27001-information-security.html
-reviewed: n-1OZqmSlOe8UqIrKcueY-zYw-SFDmifkr9o1IS676A=
-test: ok
-text: |
-  System powinien przechowywać dane w bezpieczny sposób.
-uid: SYS002
-```
+W polu ref można umieszczać tekst. Doorstop automatycznie przeszuka katalog roboczy i odszuka tekst w plikach. Widoczne po np zpublikowaniu wymagań do formatu html.
 
 ---
 
@@ -127,19 +123,19 @@ Doorstop umożliwia tworzenie powiązań między wymaganiami, wskazując ich zal
 
 
 ```bash
-doorstop create SW docs/SW
-doorstop add SW
-doorstop link SW001 SYS001 # Powiązanie widoczne tylko w SW001
+doorstop create WT docs/WT
+doorstop add WT
+doorstop link WT001 WF001 # Powiązanie widoczne tylko w WT001
 ```
 
-Przykładowy plik `SW001.yml`:
+Przykładowy plik `WT001.yml`:
 
 ```yaml
-uid: SW001
+uid: WT001
 text: Aplikacja powinna implementować formularz logowania.
 level: 2
 links:
-  - SYS001: null # Możliwe ustawienie dodatkowych atrbytuów połączenia, np. typ lub uzasadnienie
+  - WF001: null # Możliwe ustawienie dodatkowych atrbytuów połączenia, np. typ lub uzasadnienie
 active: true
 test: implemented
 ```
@@ -149,6 +145,7 @@ Aby sprawdzić poprawność struktury naszych wymagań, należy po prostu urucho
 ```bash
 doorstop
 ```
+Wówczas, jeżeli struktura wymagań jest poprawna, Doorstop "podpisze" odpowiednie pola w wymaganiu hashem SHA-256
 
 ---
 ## Eksportowanie wymagań 
@@ -169,19 +166,19 @@ doorstop publish <prefix|all> [ścieżka]
 ### Pozostałe komendy
 
 ```bash
-doorstop review <prefix|all> # Oznacza wymagania jako zrecenzowane - zostaje ustawiony unikatowy klucz SHA-256 na podstawie treści wymagania
-doorstop unlink SW001 SYS001
+doorstop review <prefix|all> # Oznacza wymagania jako zrecenzowane - zostaje ustawiony hash SHA-256 na podstawie treści wymagania
+doorstop unlink WT001 WF001
 ```
 ---
 ## Przykłady użycia - integracja z CI/CD w GitHubie:
-Doorstop bardzo dobrze sprawdza się jako dosyć wszechstronne narzędzie umożliwiające integrację z różnymi zewnętrznymi systemami. Poniżej przykład integracji z CI/CD w GitHubie za pomocą skryptu w Pythonie:
+Doorstop bardzo dobrze sprawdza się jako dosyć wszechstronne narzędzie umożliwiające integrację z różnymi zewnętrznymi Systemami. Poniżej przykład integracji z CI/CD w GitHubie za pomocą skryptu w Pythonie:
 Plik `check_requirements.py`
 ```python
-import sys
+import WF
 import yaml
 
 EXPORT_FILE = "requirements.yaml"
-REQUIRED_PREFIX = "SYS"
+REQUIRED_PREFIX = "WF"
 REQUIRED_COVERAGE = 0.5
 VALID_TEST_STATUSES = {"implemented", "passed", "ok"}
 
@@ -190,17 +187,17 @@ def main():
         data = yaml.safe_load(f)
 
     if not data:
-        print("ERROR: Exported YAML is empty or invalid.", file=sys.stderr)
-        sys.exit(1)
+        print("ERROR: Exported YAML is empty or invalid.", file=WF.stderr)
+        WF.exit(1)
 
     relevant_items = [
         item for uid, item in data.items()
-        if uid.startswith(REQUIRED_PREFIX) and item.get("active", True)
+        if uid.startWTith(REQUIRED_PREFIX) and item.get("active", True)
     ]
 
     if not relevant_items:
-        print(f"ERROR: No active requirements with prefix '{REQUIRED_PREFIX}'.", file=sys.stderr)
-        sys.exit(1)
+        print(f"ERROR: No active requirements with prefix '{REQUIRED_PREFIX}'.", file=WF.stderr)
+        WF.exit(1)
 
     tested = sum(
         1 for item in relevant_items
@@ -213,11 +210,11 @@ def main():
     print(f"{REQUIRED_PREFIX} coverage: {tested}/{total} ({coverage:.1%})")
 
     if coverage < REQUIRED_COVERAGE:
-        print(f"ERROR: Test coverage below threshold ({REQUIRED_COVERAGE:.0%}).", file=sys.stderr)
-        sys.exit(1)
+        print(f"ERROR: Test coverage below threshold ({REQUIRED_COVERAGE:.0%}).", file=WF.stderr)
+        WF.exit(1)
 
     print("SUCCESS: Requirement test coverage OK.")
-    sys.exit(0)
+    WF.exit(0)
 
 if __name__ == "__main__":
     main()
@@ -244,7 +241,7 @@ jobs:
         run: pip install doorstop pyyaml
 
       - name: Export requirements
-        run: doorstop export -y SYS requirements.yaml
+        run: doorstop export -y WF requirements.yaml
 
 
       - name: Check requirement coverage
@@ -253,49 +250,7 @@ jobs:
 ```
 
 ---
-## Struktura wymagań: podział na WF i WT
 
-W celu uporządkowanego zarządzania wymaganiami w projekcie, zastosowano dwupoziomowy podział:
-
-| Typ dokumentu | Opis                                                                 |
-|---------------|----------------------------------------------------------------------|
-| **WF**        | Wymagania funkcjonalne. Opisują, co system powinien robić.           |
-| **WT**        | Wymagania testowe. Określają sposób weryfikacji spełnienia wymagań. |
-
-Doorstop umożliwia reprezentowanie wymagań jako elementów powiązanych ze sobą poprzez relacje nadrzędny–podrzędny lub wiele-do-wielu (graf wymagań).
-
-### Przykład
-
-#### WF001 – Logowanie do systemu
-```yaml
-active: true
-derived: false
-header: ''
-level: 1.0
-links: []
-normative: true
-ref: Authenticator
-reviewed: uMYtrrGresKU4sLxHaHzH6n-vj7K1_pcAX7fPpIfqGQ=
-text: |
-  System powinien umożliwić logowanie użytkownika.
-uid: WF001
-```
-
-#### WT001 - Testowanie logowania do systemu
-```yaml
-active: true
-derived: false
-header: ''
-level: 1.0
-links:
-- WF001: uMYtrrGresKU4sLxHaHzH6n-vj7K1_pcAX7fPpIfqGQ=
-normative: true
-ref: test_login_success
-reviewed: PnYTcj2bRzCGgjvKVs_4-yEzG7qNfxg-27H_tR8up-E=
-text: |
-  Test logowania użytkownika z prawidłowymi danymi.
-uid: WT001
-```
 ### Źródła
 https://github.com/doorstop-dev/doorstop
 https://doorstop.readthedocs.io/en/latest/
