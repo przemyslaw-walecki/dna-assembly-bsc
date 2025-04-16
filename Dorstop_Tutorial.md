@@ -71,7 +71,7 @@ Każde wymaganie jest reprezentowane jako plik YAML. Poniżej opisano możliwe p
 |--------------|----------------|------------------------------------------------------------------------------------------|
 | `uid`        | ciąg znaków    | Unikalny identyfikator wymogu (np. `WF001`, `WT003`).                                  |
 | `text`       | ciąg znaków    | Treść wymagania w języku naturalnym – opisuje oczekiwane zachowanie/system.             |
-| `level`      | liczba         | Poziom wymagania – 1 = ogólne, wysokopoziomowe, 2+ = coraz bardziej szczegółowe.         |
+| `level`      | liczba         | Poziom wymagania wewnątrz grupy: 1.0 2.0 - ten sam poziom, 1.1 - pod 1.0, widoczne poprzez wcięcia po zpublikowaniu do html         |
 | `active`     | logiczny       | Czy wymaganie jest aktywne (`true`) czy nieaktywne (`false`).                            |
 | `links`      | lista          | _(opcjonalne)_ Lista identyfikatorów powiązanych wymagań nadrzędnych (np. `WF001`).    |
 | `test`       | ciąg znaków    | _(opcjonalne)_ Status testu – np. `implemented`, `untested`, `passed`, `failed`.        |
@@ -113,7 +113,7 @@ Dodanie kolejnego wymagania:
 ```bash
 doorstop add WF
 ```
-W polu ref można umieszczać tekst. Doorstop automatycznie przeszuka katalog roboczy i odszuka tekst w plikach. Widoczne po np zpublikowaniu wymagań do formatu html.
+W polu ref można umieszczać tekst. Doorstop automatycznie przeszuka katalog roboczy i odszuka wpisany tekst w plikach. Widoczne po np zpublikowaniu wymagań do formatu html.
 
 ---
 
@@ -132,10 +132,10 @@ Przykładowy plik `WT001.yml`:
 
 ```yaml
 uid: WT001
-text: Aplikacja powinna implementować formularz logowania.
-level: 2
+text: Użytkownik otrzymuje klucz sesji po podaniu poprawnych danych logowania
+level: 1.0
 links:
-  - WF001: null # Możliwe ustawienie dodatkowych atrbytuów połączenia, np. typ lub uzasadnienie
+  - WF001: null
 active: true
 test: implemented
 ```
