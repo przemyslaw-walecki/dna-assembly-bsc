@@ -1,93 +1,133 @@
 from collections import defaultdict, deque
-from typing import List
+from typing import List, Set, Tuple
 
 class KmerGraph:
     def __init__(self, k: int):
         self.k = k
-        self.edges = defaultdict(list)
-        self.in_degree = defaultdict(int)
+        self.edges      = defaultdict(set)
+        self.in_degree  = defaultdict(int)
         self.out_degree = defaultdict(int)
+
+    def _encode(self, s: str) -> int:
+        base_map = {'A': 0, 'C': 1, 'G': 2, 'T': 3}
+        code = 0
+        for b in s:
+            code = (code << 2) | base_map[b]
+        return code
+
+    def _decode(self, code: int) -> str:
+        inv = ['A', 'C', 'G', 'T']
+        s = []
+        for _ in range(self.k):
+            s.append(inv[code & 3])
+            code >>= 2
+        return ''.join(reversed(s))
 
     def build(self, reads: List[str]):
         for read in reads:
             for i in range(len(read) - self.k):
-                kmer1 = read[i:i+self.k]
-                kmer2 = read[i+1:i+self.k+1]
-                self.edges[kmer1].append(kmer2)
-                self.out_degree[kmer1] += 1
-                self.in_degree[kmer2] += 1
+                u = self._encode(read[i : i+self.k])
+                v = self._encode(read[i+1 : i+self.k+1])
+                self.edges[u].add(v)
+                self.out_degree[u] += 1
+                self.in_degree[v]  += 1
 
     def remove_dead_ends(self, max_depth: int = 5):
-        to_remove = set()
-        for node in list(self.graph.keys()):
-            if len(self.graph[node]) == 0:
-                path = [node]
-                current = node
-                for _ in range(max_depth):
-                    preds = [n for n, succs in self.graph.items() if current in succs]
-                    if len(preds) != 1:
-                        break
-                    prev = preds[0]
-                    if len(self.graph[prev]) > 1:
-                        break
-                    path.append(prev)
-                    current = prev
-                if len(path) <= max_depth:
-                    to_remove.update(path)
+        all_nodes = set(self.edges) | set(self.in_degree) | set(self.out_degree)
 
-        for node in to_remove:
-            self.graph.pop(node, None)
-            for succs in self.graph.values():
-                succs.discard(node)
-    
-    from collections import deque
+        pred: defaultdict[int, Set[int]] = defaultdict(set)
+        for u, succs in self.edges.items():
+            for v in succs:
+                pred[v].add(u)
 
-    def remove_bubbles(self, max_depth=100):
+        to_remove: Set[int] = set()
+        depth: dict[int,int]  = {}
+
+        queue = deque()
+        for n in all_nodes:
+            if self.out_degree.get(n, 0) == 0:
+                queue.append(n)
+                depth[n] = 0
+
+        while queue:
+            curr = queue.popleft()
+            d    = depth[curr]
+            if d >= max_depth:
+                continue
+            for p in pred[curr]:
+                if self.out_degree.get(p, 0) == 1:
+                    if p not in depth:
+                        depth[p] = d + 1
+                        queue.append(p)
+                    to_remove.add(p)
+
+        for n in to_remove:
+            for s in list(self.edges.get(n, ())):
+                self.in_degree[s] -= 1
+            for p in pred.get(n, ()):
+                self.out_degree[p] -= 1
+                self.edges[p].discard(n)
+
+            self.edges.pop(n,   None)
+            self.in_degree.pop(n, None)
+            self.out_degree.pop(n, None)
+
+        del pred
+
+    def remove_bubbles(self, max_depth: int = 100):
+        pred = defaultdict(set)
+        for u, succs in self.edges.items():
+            for v in succs:
+                pred[v].add(u)
+
         visited_pairs = set()
         to_remove = set()
 
-        for source in list(self.graph.keys()):
-            if len(self.graph[source]) < 2:
+        for src, succs in list(self.edges.items()):
+            if len(succs) < 2:
                 continue
 
-            paths = self._find_bubble_paths(source, max_depth)
-            for path1, path2 in paths:
-                if not path1 or not path2:
+            seen = {}
+            paths = []
+            queue = deque([(src, [src])])
+
+            while queue:
+                node, path = queue.popleft()
+                if len(path) > max_depth:
                     continue
-                if (tuple(path1), tuple(path2)) in visited_pairs:
+                for nb in self.edges.get(node, ()):
+                    if nb in path:
+                        continue
+                    new_path = path + [nb]
+                    if nb in seen:
+                        paths.append((seen[nb], new_path))
+                    else:
+                        seen[nb] = new_path
+                        queue.append((nb, new_path))
+
+            for p1, p2 in paths:
+                key = (tuple(p1), tuple(p2))
+                if key in visited_pairs:
                     continue
-                visited_pairs.add((tuple(path1), tuple(path2)))
-                visited_pairs.add((tuple(path2), tuple(path1)))
+                visited_pairs.add(key)
+                visited_pairs.add((tuple(p2), tuple(p1)))
+                weak = p1 if len(p1) < len(p2) else p2
+                to_remove.update(weak)
 
-                weak_path = self._choose_weaker_path(path1, path2)
-                to_remove.update(weak_path)
+        for n in to_remove:
+            for s in list(self.edges.get(n, ())):
+                self.in_degree[s] -= 1
+            for p in pred.get(n, ()):
+                if p in self.edges:
+                    self.out_degree[p] -= 1
+                    self.edges[p].discard(n)
+            self.edges.pop(n, None)
+            self.in_degree.pop(n, None)
+            self.out_degree.pop(n, None)
 
-        for node in to_remove:
-            self.graph.pop(node, None)
-            for succs in self.graph.values():
-                succs.discard(node)
+        del pred
+    
+    def edge_count(self):
+        return sum(len(succs) for succs in self.edges.values())
 
-    def _find_bubble_paths(self, start, max_depth):
-        paths = []
-        queue = deque([(start, [start])])
-        seen = {}
-
-        while queue:
-            node, path = queue.popleft()
-            if len(path) > max_depth:
-                continue
-
-            for neighbor in self.graph.get(node, []):
-                if neighbor in path:
-                    continue
-                new_path = path + [neighbor]
-                if neighbor in seen:
-                    paths.append((seen[neighbor], new_path))
-                else:
-                    seen[neighbor] = new_path
-                    queue.append((neighbor, new_path))
-        return paths
-
-    def _choose_weaker_path(self, path1, path2):
-        return path1 if len(path1) < len(path2) else path2
 

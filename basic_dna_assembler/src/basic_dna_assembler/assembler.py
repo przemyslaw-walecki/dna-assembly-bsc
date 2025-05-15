@@ -1,24 +1,38 @@
+from src.basic_dna_assembler.kmer_graph import KmerGraph
+from typing import List, Tuple, Set
+
 class Assembler:
-    def __init__(self, graph):
+    def __init__(self, graph: KmerGraph):
         self.graph = graph
 
-    def assemble_contigs(self):
-        contigs = []
-        visited = set()
+    def assemble_contigs(self) -> List[str]:
+        contigs: List[str] = []
+        visited_edges: Set[Tuple[int, int]] = set()
+        edges = self.graph.edges
+        in_deg = self.graph.in_degree
+        out_deg = self.graph.out_degree
 
-        def walk(node):
-            contig = node
-            while node in self.graph.edges and len(self.graph.edges[node]) == 1:
-                next_node = self.graph.edges[node][0]
-                contig += next_node[-1]
-                node = next_node
-            return contig
-
-        for node in self.graph.edges:
-            if self.graph.in_degree[node] != 1 or self.graph.out_degree[node] != 1:
-                for next_node in self.graph.edges[node]:
-                    if next_node not in visited:
-                        contig = walk(next_node)
-                        visited.add(next_node)
-                        contigs.append(contig)
+        for u in list(edges):
+            if in_deg.get(u, 0) != 1 or out_deg.get(u, 0) != 1:
+                for v in edges.get(u, ()):
+                    if (u, v) in visited_edges:
+                        continue
+                    path = [u]
+                    curr = v
+                    visited_edges.add((u, v))
+                    while True:
+                        path.append(curr)
+                        if in_deg.get(curr, 0) == 1 and out_deg.get(curr, 0) == 1:
+                            nbrs = edges.get(curr, ())
+                            if not nbrs:
+                                break
+                            nxt = next(iter(nbrs))
+                            visited_edges.add((curr, nxt))
+                            curr = nxt
+                            continue
+                        break
+                    seq = self.graph._decode(path[0])
+                    for code in path[1:]:
+                        seq += self.graph._decode(code)[-1]
+                    contigs.append(seq)
         return contigs

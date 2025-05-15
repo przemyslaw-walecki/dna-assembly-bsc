@@ -13,10 +13,14 @@ def main():
 
 
     graph = KmerGraph(k=51)
-    #graph.count_kmers(reads, 4)
     graph.build(reads)
-#    graph.remove_dead_ends()
-#    graph.remove_bubbles()
+    print(F"Built graph. Edges: {graph.edge_count()}.")
+    graph.remove_dead_ends(20)
+    print(f"Removed dead branches. Edges after pruning: {graph.edge_count()}.")
+    branching = sum(1 for succs in graph.edges.values() if len(succs) > 1)
+    print(f" {branching} nodes with out_degree > 1 (branching)")
+    #graph.remove_bubbles(10)
+    #print(f"Removed bubbles. Edges for asssembly: {graph.edge_count()}.")
 
     assembler = Assembler(graph)
     contigs = assembler.assemble_contigs()
