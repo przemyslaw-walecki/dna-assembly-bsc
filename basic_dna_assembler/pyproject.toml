@@ -1,0 +1,21 @@
+[project]
+name = "basic-dna-assembler"
+version = "0.1.0"
+description = ""
+authors = [
+    {name = "przemyslaw-walecki",email = "p.walecki12@gmail.com"}
+]
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+]
+
+[tool.poetry]
+packages = [{include = "basic_dna_assembler", from = "src"}]
+
+[tool.poetry.scripts]
+assemble = "basic_dna_assembler.main:main"
+
+[build-system]
+requires = ["poetry-core>=2.0.0,<3.0.0"]
+build-backend = "poetry.core.masonry.api"
