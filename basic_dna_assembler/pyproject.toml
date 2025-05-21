@@ -15,6 +15,7 @@ packages = [{include = "basic_dna_assembler", from = "src"}]
 
 [tool.poetry.scripts]
 assemble = "basic_dna_assembler.main:main"
+compare-assemblies = "basic_dna_assembler.compare_assemblies:main"
 
 [build-system]
 requires = ["poetry-core>=2.0.0,<3.0.0"]
