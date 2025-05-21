@@ -32,6 +32,4 @@
 
 | Reference | Assembler | Total | Aligned | % Aligned | Avg Len | Avg MM |
 | --- | --- | --- | --- | --- | --- | --- |
-| /GCF_000007365.1_ASM736v1_genomic.fna | ecoli_dnaasm | 11944 | 11437 | 95.8 | 135.3 | 0.05 |
-| /GCF_000007365.1_ASM736v1_genomic.fna | own_ecoli_rust_k31 | 668 | 653 | 97.8 | 963.1 | 0.00 |
-| /GCF_000007365.1_ASM736v1_genomic.fna | own_ecoli_rust_k51 | 496262 | 106725 | 21.5 | 61.3 | 1.49 |
+| /GCF_000007365.1_ASM736v1_genomic.fna | own_ecoli_rust_k51_d51_t5 | 449690 | 409367 | 91.0 | 70.6 | 0.89 |

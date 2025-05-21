@@ -4,10 +4,10 @@ use std::collections::{HashSet as StdHashSet, VecDeque};
 
 pub struct KmerGraph {
     pub k: usize,
-    pub edges: HashMap<u64, HashSet<u64>>,
-    pub in_degree: HashMap<u64, usize>,
-    pub out_degree: HashMap<u64, usize>,
-    pub edge_counts: HashMap<(u64, u64), usize>,
+    pub edges: HashMap<u128, HashSet<u128>>,
+    pub in_degree: HashMap<u128, usize>,
+    pub out_degree: HashMap<u128, usize>,
+    pub edge_counts: HashMap<(u128, u128), usize>,
 }
 
 impl KmerGraph {
@@ -21,8 +21,8 @@ impl KmerGraph {
         }
     }
 
-    pub fn encode(&self, s: &str) -> u64 {
-        let mut c: u64 = 0;
+    pub fn encode(&self, s: &str) -> u128 {
+        let mut c: u128 = 0;
         for b in s.bytes() {
             let v = match b {
                 b'A' => 0,
@@ -36,7 +36,7 @@ impl KmerGraph {
         c
     }
 
-    pub fn decode(&self, mut code: u64) -> String {
+    pub fn decode(&self, mut code: u128) -> String {
         let mut buf = vec!['A'; self.k];
         for i in (0..self.k).rev() {
             buf[i] = match code & 3 {
@@ -87,14 +87,14 @@ impl KmerGraph {
         let max_depth = max_depth.unwrap_or(self.k);
 
         for depth in 1..=max_depth {
-            let mut pred: HashMap<u64, HashSet<u64>> = HashMap::default();
+            let mut pred: HashMap<u128, HashSet<u128>> = HashMap::default();
             for (&u, succs) in &self.edges {
                 for &v in succs {
                     pred.entry(v).or_default().insert(u);
                 }
             }
 
-            let tips: Vec<u64> = self
+            let tips: Vec<u128> = self
                 .out_degree
                 .iter()
                 .filter_map(|(&n, &od)| if od == 0 { Some(n) } else { None })
@@ -114,7 +114,7 @@ impl KmerGraph {
                                 && self.out_degree.get(&p).copied().unwrap_or(0) == 1
                         })
                         .copied()
-                        .collect::<Vec<u64>>();
+                        .collect::<Vec<u128>>();
 
                     if preds.len() != 1 {
                         break;
@@ -131,7 +131,6 @@ impl KmerGraph {
                 break;
             }
 
-            // apply removals
             for &n in &to_remove {
                 if let Some(succs) = self.edges.remove(&n) {
                     for v in succs {
@@ -156,22 +155,22 @@ impl KmerGraph {
     }
 
     pub fn remove_bubbles(&mut self, max_depth: usize) {
-        let mut pred: HashMap<u64, HashSet<u64>> = HashMap::default();
+        let mut pred: HashMap<u128, HashSet<u128>> = HashMap::default();
         for (&u, succs) in &self.edges {
             for &v in succs {
                 pred.entry(v).or_default().insert(u);
             }
         }
 
-        let mut to_drop: HashSet<u64> = HashSet::default();
-        let mut seen_pairs: HashSet<(Vec<u64>, Vec<u64>)> = HashSet::default();
+        let mut to_drop: HashSet<u128> = HashSet::default();
+        let mut seen_pairs: HashSet<(Vec<u128>, Vec<u128>)> = HashSet::default();
 
         for (&src, succs) in &self.edges {
             if succs.len() < 2 {
                 continue;
             }
-            let mut seen: HashMap<u64, Vec<u64>> = HashMap::default();
-            let mut q: VecDeque<Vec<u64>> = VecDeque::new();
+            let mut seen: HashMap<u128, Vec<u128>> = HashMap::default();
+            let mut q: VecDeque<Vec<u128>> = VecDeque::new();
             q.push_back(vec![src]);
 
             while let Some(path) = q.pop_front() {
@@ -222,20 +221,15 @@ impl KmerGraph {
             self.out_degree.remove(&n);
         }
 
-        // ensure every node survives in the maps
         self.normalize_nodes();
     }
 
-    /// Total number of edges in the graph.
     pub fn edge_count(&self) -> usize {
         self.edges.values().map(|s| s.len()).sum()
     }
 
-    /// After pruning, make sure every node seen anywhere has an entry
-    /// in edges, in_degree, and out_degree. This lets you safely use
-    /// `map[&node]` in downstream code without panics.
     fn normalize_nodes(&mut self) {
-        let all_nodes: StdHashSet<u64> = self
+        let all_nodes: StdHashSet<u128> = self
             .edges
             .keys()
             .chain(self.in_degree.keys())
