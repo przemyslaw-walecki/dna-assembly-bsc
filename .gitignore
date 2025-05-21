@@ -2,3 +2,4 @@
 basic_dna_assembler/alignment.sam
 basic_dna_assembler/assembled_contigs.fasta
 config.bat
+*.fa
