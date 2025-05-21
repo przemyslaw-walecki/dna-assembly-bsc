@@ -1,6 +1,6 @@
 use fxhash::FxHashMap as HashMap;
 use fxhash::FxHashSet as HashSet;
-use std::collections::VecDeque;
+use std::collections::{HashSet as StdHashSet, VecDeque};
 
 pub struct KmerGraph {
     pub k: usize,
@@ -11,7 +11,6 @@ pub struct KmerGraph {
 }
 
 impl KmerGraph {
-    /// Create a new empty graph for k-mers of size `k`.
     pub fn new(k: usize) -> Self {
         Self {
             k,
@@ -22,7 +21,6 @@ impl KmerGraph {
         }
     }
 
-    /// Bit-pack a k-mer string into a u64.
     pub fn encode(&self, s: &str) -> u64 {
         let mut c: u64 = 0;
         for b in s.bytes() {
@@ -38,7 +36,6 @@ impl KmerGraph {
         c
     }
 
-    /// Decode a packed k-mer code back into a String.
     pub fn decode(&self, mut code: u64) -> String {
         let mut buf = vec!['A'; self.k];
         for i in (0..self.k).rev() {
@@ -53,7 +50,6 @@ impl KmerGraph {
         buf.into_iter().collect()
     }
 
-    /// Build the de Bruijn graph by counting k->k+1 transitions.
     pub fn build(&mut self, reads: &[String]) {
         for r in reads {
             if r.len() < self.k + 1 { continue; }
@@ -70,7 +66,6 @@ impl KmerGraph {
         }
     }
 
-    /// Remove edges seen fewer than `threshold` times.
     pub fn filter_low_coverage(&mut self, threshold: usize) {
         let mut to_remove = Vec::new();
         for (&(u, v), &cnt) in &self.edge_counts {
@@ -88,10 +83,9 @@ impl KmerGraph {
         }
     }
 
-    /// Remove dead‐end tips up to `max_depth`.
     pub fn remove_dead_ends(&mut self, max_depth: Option<usize>) {
         let max_depth = max_depth.unwrap_or(self.k);
-    
+
         for depth in 1..=max_depth {
             let mut pred: HashMap<u64, HashSet<u64>> = HashMap::default();
             for (&u, succs) in &self.edges {
@@ -99,13 +93,12 @@ impl KmerGraph {
                     pred.entry(v).or_default().insert(u);
                 }
             }
-    
+
             let tips: Vec<u64> = self
                 .out_degree
                 .iter()
                 .filter_map(|(&n, &od)| if od == 0 { Some(n) } else { None })
                 .collect();
-    
 
             let mut to_remove = HashSet::default();
             for tip in tips {
@@ -122,7 +115,7 @@ impl KmerGraph {
                         })
                         .copied()
                         .collect::<Vec<u64>>();
-    
+
                     if preds.len() != 1 {
                         break;
                     }
@@ -133,12 +126,12 @@ impl KmerGraph {
                     to_remove.extend(chain);
                 }
             }
-    
 
             if to_remove.is_empty() {
                 break;
             }
 
+            // apply removals
             for &n in &to_remove {
                 if let Some(succs) = self.edges.remove(&n) {
                     for v in succs {
@@ -158,9 +151,10 @@ impl KmerGraph {
                 self.out_degree.remove(&n);
             }
         }
+
+        self.normalize_nodes();
     }
 
-    /// Remove bubbles, keeping only the longer of two distinct paths up to `max_depth`.
     pub fn remove_bubbles(&mut self, max_depth: usize) {
         let mut pred: HashMap<u64, HashSet<u64>> = HashMap::default();
         for (&u, succs) in &self.edges {
@@ -185,23 +179,25 @@ impl KmerGraph {
                     continue;
                 }
                 let n = *path.last().unwrap();
-                for &nxt in self.edges.get(&n).into_iter().flat_map(|s| s.iter()) {
-                    if path.contains(&nxt) {
-                        continue;
-                    }
-                    let mut newp = path.clone();
-                    newp.push(nxt);
-                    if let Some(p2) = seen.get(&nxt) {
-                        let key = (newp.clone(), p2.clone());
-                        if !seen_pairs.contains(&key) {
-                            seen_pairs.insert(key.clone());
-                            seen_pairs.insert((p2.clone(), newp.clone()));
-                            let drop_path = if newp.len() < p2.len() { &newp } else { p2 };
-                            to_drop.extend(drop_path.iter().copied());
+                if let Some(neighbors) = self.edges.get(&n) {
+                    for &nxt in neighbors {
+                        if path.contains(&nxt) {
+                            continue;
                         }
-                    } else {
-                        seen.insert(nxt, newp.clone());
-                        q.push_back(newp);
+                        let mut newp = path.clone();
+                        newp.push(nxt);
+                        if let Some(p2) = seen.get(&nxt) {
+                            let key = (newp.clone(), p2.clone());
+                            if !seen_pairs.contains(&key) {
+                                seen_pairs.insert(key.clone());
+                                seen_pairs.insert((p2.clone(), newp.clone()));
+                                let drop_path = if newp.len() < p2.len() { &newp } else { p2 };
+                                to_drop.extend(drop_path.iter().copied());
+                            }
+                        } else {
+                            seen.insert(nxt, newp.clone());
+                            q.push_back(newp);
+                        }
                     }
                 }
             }
@@ -225,10 +221,31 @@ impl KmerGraph {
             self.in_degree.remove(&n);
             self.out_degree.remove(&n);
         }
+
+        // ensure every node survives in the maps
+        self.normalize_nodes();
     }
 
     /// Total number of edges in the graph.
     pub fn edge_count(&self) -> usize {
         self.edges.values().map(|s| s.len()).sum()
+    }
+
+    /// After pruning, make sure every node seen anywhere has an entry
+    /// in edges, in_degree, and out_degree. This lets you safely use
+    /// `map[&node]` in downstream code without panics.
+    fn normalize_nodes(&mut self) {
+        let all_nodes: StdHashSet<u64> = self
+            .edges
+            .keys()
+            .chain(self.in_degree.keys())
+            .chain(self.out_degree.keys())
+            .copied()
+            .collect();
+        for n in all_nodes {
+            self.edges.entry(n).or_default();
+            self.in_degree.entry(n).or_default();
+            self.out_degree.entry(n).or_default();
+        }
     }
 }
