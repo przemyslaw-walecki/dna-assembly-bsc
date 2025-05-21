@@ -124,7 +124,7 @@ def main():
     parser.add_argument(
         "--data-dir",
         "-d",
-        default="data",
+        default="./data",
         help="Directory containing assembled_{name}.fa files",
     )
     parser.add_argument(

@@ -1,21 +1,23 @@
 import subprocess
-import os
 import re
 
+
 class Evaluator:
-    def __init__(self, reference_path: str, contigs_path: str, output_sam="alignment.sam"):
+    def __init__(
+        self, reference_path: str, contigs_path: str, output_sam="alignment.sam"
+    ):
         self.reference_path = reference_path
         self.contigs_path = contigs_path
         self.output_sam = output_sam
 
     def evaluate(self):
         print("Evaluating assembly")
-        cmd = [
-            "minimap2", "-a", self.reference_path, self.contigs_path
-        ]
+        cmd = ["minimap2", "-a", self.reference_path, self.contigs_path]
         try:
             with open(self.output_sam, "w") as sam_out:
-                subprocess.run(cmd, stdout=sam_out, stderr=subprocess.PIPE, text=True, check=True)
+                subprocess.run(
+                    cmd, stdout=sam_out, stderr=subprocess.PIPE, text=True, check=True
+                )
         except FileNotFoundError:
             print("minimap2 not installed. Skipping evaluation.")
             return
