@@ -30,7 +30,7 @@ class KmerGraph:
 
     def build(self, reads: List[str]):
         """
-        Count every k→k+1 transition, record its coverage,
+        Count every k->k+1 transition, record its coverage,
         then add it to the graph only once (unique edges).
         """
         for r in reads:
