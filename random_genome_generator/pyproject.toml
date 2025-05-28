@@ -15,6 +15,7 @@ packages = [{include = "random_genome_generator", from = "src"}]
 
 [tool.poetry.scripts]
 generate-genome = "random_genome_generator.genome_generator:main"
+generate-reads = "random_genome_generator.deterministic_reads_generator:main"
 
 [build-system]
 requires = ["poetry-core>=2.0.0,<3.0.0"]

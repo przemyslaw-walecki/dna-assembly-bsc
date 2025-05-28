@@ -16,7 +16,7 @@
 | /random.fna | own_random_rust | 88 | 84 | 95.5 | 1368.1 | 0.00 |
 | /random.fna | own_random_python | 88 | 84 | 95.5 | 1368.1 | 0.00 |
 
-
+### Assembly Comparison Results
 
 **Reference genome:** `/GCF_000007365.1_ASM736v1_genomic.fna`
 
@@ -33,3 +33,31 @@
 | Reference | Assembler | Total | Aligned | % Aligned | Avg Len | Avg MM |
 | --- | --- | --- | --- | --- | --- | --- |
 | /GCF_000007365.1_ASM736v1_genomic.fna | own_ecoli_rust_k51_d51_t5 | 449690 | 409367 | 91.0 | 70.6 | 0.89 |
+
+
+
+### Assembly Comparison Results
+
+**Reference genome:** `/random_shorter.fna`
+
+| Reference | Assembler | Total | Aligned | % Aligned | Avg Len | Avg MM |
+| --- | --- | --- | --- | --- | --- | --- |
+| /random_shorter.fna | short_random_rust | 2 | 2 | 100.0 | 901.5 | 0.00 |
+
+
+### Assembly Comparison Results
+
+**Reference genome:** `/random_1000.fa`
+
+| Reference | Assembler | Total | Aligned | % Aligned | Avg Len | Avg MM |
+| --- | --- | --- | --- | --- | --- | --- |
+| /random_1000.fa | proof_1000 | 1 | 1 | 100.0 | 1000.0 | 0.00 |
+
+
+### Assembly Comparison Results
+
+**Reference genome:** `/random_10000.fna`
+
+| Reference | Assembler | Total | Aligned | % Aligned | Avg Len | Avg MM |
+| --- | --- | --- | --- | --- | --- | --- |
+| /random_10000.fna | proof_pirs | 1 | 1 | 100.0 | 10000.0 | 0.00 |
