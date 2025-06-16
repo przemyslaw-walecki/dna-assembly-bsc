@@ -19,7 +19,7 @@ def parse_fasta(path):
     seq_lines = []
     with open(path, 'r') as f:
         for line in f:
-            line = line.rstrip()  # remove newline
+            line = line.rstrip()
             if not line:
                 continue
             if line.startswith('>'):

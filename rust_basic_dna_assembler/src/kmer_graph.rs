@@ -1,16 +1,40 @@
+//! K-mer de Bruijn graph construction and simplification module.
+//!
+//! This module defines the `KmerGraph` struct, which represents a directed de Bruijn graph
+//! built from DNA sequencing reads. It includes methods for graph construction, edge filtering,
+//! dead-end pruning, bubble removal, and decoding encoded k-mers.
+//!
+//! # Overview
+//!
+//! - k-mers are encoded as `u128` integers
+//! - nodes represent k-mers; edges represent (k+1)-mers
+//! - supports graph cleaning operations like low-coverage removal, dead-end trimming, and bubble removal
+//!
+//! # Dependencies
+//!
+//! - Uses `fxhash` for fast hashing
+//! - `VecDeque` for breadth-first search during bubble detection
+
 use fxhash::FxHashMap as HashMap;
 use fxhash::FxHashSet as HashSet;
 use std::collections::{HashSet as StdHashSet, VecDeque};
 
+/// Directed de Bruijn graph for k-mers.
 pub struct KmerGraph {
+    /// Length of k-mers used in the graph.
     pub k: usize,
+    /// Adjacency list: maps each node to a set of successor nodes.
     pub edges: HashMap<u128, HashSet<u128>>,
+    /// Maps node to in-degree count.
     pub in_degree: HashMap<u128, usize>,
+    /// Maps node to out-degree count.
     pub out_degree: HashMap<u128, usize>,
+    /// Number of times each edge (u, v) appeared in reads.
     pub edge_counts: HashMap<(u128, u128), usize>,
 }
 
 impl KmerGraph {
+    /// Creates a new, empty `KmerGraph` with the given k-mer length.
     pub fn new(k: usize) -> Self {
         Self {
             k,
@@ -21,6 +45,10 @@ impl KmerGraph {
         }
     }
 
+    /// Encodes a DNA k-mer string (e.g., `"ACG"`) into a compact `u128` integer.
+    ///
+    /// # Panics
+    /// If the string contains invalid bases.
     pub fn encode(&self, s: &str) -> u128 {
         let mut c: u128 = 0;
         for b in s.bytes() {
@@ -36,6 +64,7 @@ impl KmerGraph {
         c
     }
 
+    /// Decodes a `u128` integer into a DNA k-mer string (e.g., `"ACG"`).
     pub fn decode(&self, mut code: u128) -> String {
         let mut buf = vec!['A'; self.k];
         for i in (0..self.k).rev() {
@@ -50,9 +79,14 @@ impl KmerGraph {
         buf.into_iter().collect()
     }
 
+    /// Builds the de Bruijn graph from a list of sequencing reads.
+    ///
+    /// Adds edges and updates in/out degrees and edge counts.
     pub fn build(&mut self, reads: &[String]) {
         for r in reads {
-            if r.len() < self.k + 1 { continue; }
+            if r.len() < self.k + 1 {
+                continue;
+            }
             for i in 0..=r.len() - self.k - 1 {
                 let u = self.encode(&r[i..i + self.k]);
                 let v = self.encode(&r[i + 1..i + 1 + self.k]);
@@ -66,6 +100,7 @@ impl KmerGraph {
         }
     }
 
+    /// Removes edges with coverage below the given threshold.
     pub fn filter_low_coverage(&mut self, threshold: usize) {
         let mut to_remove = Vec::new();
         for (&(u, v), &cnt) in &self.edge_counts {
@@ -83,6 +118,10 @@ impl KmerGraph {
         }
     }
 
+    /// Removes short dead-end branches (tips) of the graph up to a specified depth.
+    ///
+    /// # Arguments
+    /// * `max_depth` - maximum chain length to remove (defaults to `k` if `None`)
     pub fn remove_dead_ends(&mut self, max_depth: Option<usize>) {
         let max_depth = max_depth.unwrap_or(self.k);
 
@@ -154,6 +193,10 @@ impl KmerGraph {
         self.normalize_nodes();
     }
 
+    /// Removes bubbles from the graph (redundant alternative paths).
+    ///
+    /// # Arguments
+    /// * `max_depth` - maximum length of bubble paths to detect and collapse.
     pub fn remove_bubbles(&mut self, max_depth: usize) {
         let mut pred: HashMap<u128, HashSet<u128>> = HashMap::default();
         for (&u, succs) in &self.edges {
@@ -224,10 +267,12 @@ impl KmerGraph {
         self.normalize_nodes();
     }
 
+    /// Returns the number of edges in the graph.
     pub fn edge_count(&self) -> usize {
         self.edges.values().map(|s| s.len()).sum()
     }
 
+    /// Ensures that all nodes in the graph have in/out-degree entries.
     fn normalize_nodes(&mut self) {
         let all_nodes: StdHashSet<u128> = self
             .edges

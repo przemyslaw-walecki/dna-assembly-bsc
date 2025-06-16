@@ -5,3 +5,5 @@ config.bat
 *.fa
 **/target/*
 *.sam
+site/
+docs/static
