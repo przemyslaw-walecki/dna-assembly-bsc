@@ -7,3 +7,5 @@ config.bat
 *.sam
 site/
 docs/static
+*.fq
+*.gfa
