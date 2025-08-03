@@ -74,10 +74,12 @@ fn main() -> io::Result<()> {
 
     // Build and clean the k-mer graph
     let mut graph = KmerGraph::new(args.kmer);
+
     graph.build(&reads);
-    graph.filter_low_coverage(args.threshold);
-    graph.remove_dead_ends(Some(args.depth));
-    graph.remove_bubbles(args.bubble_depth);
+    //graph.filter_low_coverage(args.threshold);
+    // graph.remove_dead_ends(Some(args.depth));
+    graph.write_gfa(&args.output).unwrap();
+    // graph.remove_bubbles(args.bubble_depth);
 
     // Basic graph stats
     eprintln!("Loaded {} reads", reads.len());
@@ -92,14 +94,14 @@ fn main() -> io::Result<()> {
         "Graph: {} edges, {} nodes; {} sources (in_deg=0)",
         edge_cnt, node_cnt, zero_indeg.len()
     );
-    for &u in zero_indeg.iter().take(5) {
-        eprintln!(" source kmer: {}", graph.decode(u));
-    }
+    //for &u in zero_indeg.iter().take(5) {
+    //    eprintln!(" source kmer: {}", graph.decode(u));
+    //}
 
     // Assemble contigs from the cleaned graph
-    let contigs = Assembler::new(&graph).assemble_contigs();
+    //let contigs = Assembler::new(&graph).assemble_contigs();
 
-    // Write contigs to output file in FASTA format
+    Write contigs to output file in FASTA format
     fs::create_dir_all("data")?;
     let out_path = Path::new("data").join(&args.output);
     let mut f = fs::File::create(&out_path)?;
@@ -108,6 +110,6 @@ fn main() -> io::Result<()> {
         writeln!(f, "{}", c)?;
     }
 
-    println!("Wrote {} contigs to {:?}", contigs.len(), out_path);
+    // println!("Wrote {} contigs to {:?}", contigs.len(), out_path);
     Ok(())
 }

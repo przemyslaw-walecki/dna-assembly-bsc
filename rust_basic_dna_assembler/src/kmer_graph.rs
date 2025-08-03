@@ -18,6 +18,8 @@
 use fxhash::FxHashMap as HashMap;
 use fxhash::FxHashSet as HashSet;
 use std::collections::{HashSet as StdHashSet, VecDeque};
+use std::fs::File;
+use std::io::{BufWriter, Write};
 
 /// Directed de Bruijn graph for k-mers.
 pub struct KmerGraph {
@@ -286,5 +288,40 @@ impl KmerGraph {
             self.in_degree.entry(n).or_default();
             self.out_degree.entry(n).or_default();
         }
+    }
+    
+    pub fn write_gfa(&self, path: &str) -> std::io::Result<()> {
+        let file = File::create(path)?;
+        let mut writer = BufWriter::new(file);
+    
+        writeln!(writer, "H\tVN:Z:1.0")?;
+    
+        // Collect all nodes: from edges, in_degree, out_degree
+        let mut all_nodes = StdHashSet::new();
+        for &u in self.edges.keys() {
+            all_nodes.insert(u);
+            if let Some(vs) = self.edges.get(&u) {
+                for &v in vs {
+                    all_nodes.insert(v);
+                }
+            }
+        }
+    
+        // Write segments (S lines)
+        let mut all_nodes_vec: Vec<_> = all_nodes.into_iter().collect();
+        all_nodes_vec.sort_unstable();
+        for node in all_nodes_vec.iter() {
+            let seq = self.decode(*node);
+            writeln!(writer, "S\t{}\t{}", node, seq)?;
+        }
+    
+        // Write links (L lines)
+        for (&u, succs) in &self.edges {
+            for &v in succs {
+                writeln!(writer, "L\t{}\t+\t{}\t+\t0M", u, v)?;
+            }
+        }
+    
+        Ok(())
     }
 }
