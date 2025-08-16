@@ -101,14 +101,14 @@ fn main() -> io::Result<()> {
     // Assemble contigs from the cleaned graph
     //let contigs = Assembler::new(&graph).assemble_contigs();
 
-    Write contigs to output file in FASTA format
-    fs::create_dir_all("data")?;
-    let out_path = Path::new("data").join(&args.output);
-    let mut f = fs::File::create(&out_path)?;
-    for (i, c) in contigs.iter().enumerate() {
-        writeln!(f, ">contig_{}", i + 1)?;
-        writeln!(f, "{}", c)?;
-    }
+    //Write contigs to output file in FASTA format
+    // fs::create_dir_all("data")?;
+    // let out_path = Path::new("data").join(&args.output);
+    // let mut f = fs::File::create(&out_path)?;
+    // for (i, c) in contigs.iter().enumerate() {
+    //     writeln!(f, ">contig_{}", i + 1)?;
+    //     writeln!(f, "{}", c)?;
+    // }
 
     // println!("Wrote {} contigs to {:?}", contigs.len(), out_path);
     Ok(())
