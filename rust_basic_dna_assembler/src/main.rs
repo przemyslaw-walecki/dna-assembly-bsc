@@ -17,13 +17,12 @@
 //   {
 //     bubble_id, k,
 //     start_seq, end_seq,
-//     upstream: [seq,...], downstream: [seq,...],
+//     upstream: [seq,...], downstream: [seq,...],            // <- preset greedy flanks (N=5)
 //     upstream_nodes: [{seq,cov},...], downstream_nodes: [{seq,cov},...],
 //     nodes: [{seq,cov},...],                  // supernodes in bubble+context
-//     edges: [{source_seq,target_seq,len_nodes,len_bp,cov_min,cov_mean,on_ref}, ...],
+//     edges: [{source_seq,target_seq,len_nodes,len_bp,cov_min,cov_mean}, ...],
 //     paths: [[edge_idx,...], ...],
-//     label_path: <usize|null>,
-//     label_status, ref_rev, flank_used_bp
+//     label_path: <usize|null>
 //   }
 //
 // Cargo.toml (add):
@@ -90,7 +89,7 @@ struct BubbleRecord {
     start_seq: String,
     end_seq: String,
 
-    // 1-hop context as sequences
+    // preset flanks (nearest-first, greedy over graph)
     upstream: Vec<String>,
     downstream: Vec<String>,
 
@@ -223,9 +222,6 @@ fn build_adj(
 }
 
 // ---------- Compaction (coverage aggregation + KC fallback) ----------
-
-// Fixed k-mer flank export (unique-chain), per side:
-const FLANK_K: usize = 6;
 
 fn compact_with_chains(
     nodes: &HashSet<u128>,
@@ -494,7 +490,7 @@ fn enumerate_paths_bidir(
     (p_rev, s_rev, true)
 }
 
-// ---------- Global degrees + unique flanks ----------
+// ---------- Global degrees + unique flanks (for labeling only) ----------
 
 fn compute_global_deg(
     succ: &HashMap<u128, Vec<u128>>,
@@ -723,7 +719,6 @@ impl RefText {
 
 // ---------- Labeling with adaptive flanks & KMP ----------
 
-
 fn label_with_adaptive_flanks(
     candidate_seqs: &[String], // per path (already orientation-safe within bubble)
     start: u128,
@@ -789,41 +784,79 @@ fn label_with_adaptive_flanks(
     (None, max_flank_bp * 2)
 }
 
-// ---------- Context helpers for JSON ----------
+// ---------- Preset greedy flanks (export only) ----------
 
-fn collect_neighbors_ids(
-    center: u128,
-    adj: &HashMap<u128, Vec<u128>>,
-    radius: usize,
-) -> Vec<u128> {
-    let mut out = Vec::new();
-    let mut seen: HashSet<u128> = HashSet::new();
-    let mut dq = VecDeque::new();
-    dq.push_back((center, 0usize));
-    seen.insert(center);
-    while let Some((u, d)) = dq.pop_front() {
-        if d == radius {
-            continue;
-        }
-        if let Some(vs) = adj.get(&u) {
-            for &v in vs {
-                if seen.insert(v) {
-                    out.push(v);
-                    dq.push_back((v, d + 1));
+fn best_neighbor(
+    cur: u128,
+    forward: bool,
+    succ: &HashMap<u128, Vec<u128>>,
+    pred: &HashMap<u128, Vec<u128>>,
+    segments: &HashMap<u128, Segment>,
+    edge_cov: &HashMap<(u128, u128), usize>,
+) -> Option<u128> {
+    let cand = if forward {
+        succ.get(&cur).cloned().unwrap_or_default()
+    } else {
+        pred.get(&cur).cloned().unwrap_or_default()
+    };
+    if cand.is_empty() {
+        return None;
+    }
+    // choose by: edge EC (desc), then node KC (desc), then node id (asc) for determinism
+    let mut best_id: Option<u128> = None;
+    let mut best_key: Option<(usize, usize, u128)> = None; // (ec, kc, id)
+    for n in cand {
+        let ec = if forward {
+            edge_cov.get(&(cur, n)).copied().unwrap_or(0)
+        } else {
+            edge_cov.get(&(n, cur)).copied().unwrap_or(0)
+        };
+        let kc = segments.get(&n).map(|s| s.cov).unwrap_or(0);
+        let key = (ec, kc, n);
+        match best_key {
+            None => { best_key = Some(key); best_id = Some(n); }
+            Some(bk) => {
+                if key.0 > bk.0 || (key.0 == bk.0 && (key.1 > bk.1 || (key.1 == bk.1 && key.2 < bk.2))) {
+                    best_key = Some(key);
+                    best_id = Some(n);
                 }
             }
+        }
+    }
+    best_id
+}
+
+fn collect_flanks_greedy(
+    seed: u128,
+    forward: bool, // upstream: false (use predecessors); downstream: true (use successors)
+    succ: &HashMap<u128, Vec<u128>>,
+    pred: &HashMap<u128, Vec<u128>>,
+    segments: &HashMap<u128, Segment>,
+    edge_cov: &HashMap<(u128, u128), usize>,
+    n: usize,
+) -> Vec<u128> {
+    use std::collections::HashSet;
+    let mut out: Vec<u128> = Vec::with_capacity(n);
+    let mut cur = seed;
+    let mut seen: HashSet<u128> = HashSet::new();
+    seen.insert(seed);
+
+    for _ in 0..n {
+        if let Some(nx) = best_neighbor(cur, forward, succ, pred, segments, edge_cov) {
+            if seen.contains(&nx) {
+                break; // avoid tiny cycles
+            }
+            out.push(nx);   // nearest-first
+            seen.insert(nx);
+            cur = nx;
+        } else {
+            break;
         }
     }
     out
 }
 
-fn collect_upstream_ids(start: u128, pred: &HashMap<u128, Vec<u128>>, radius: usize) -> Vec<u128> {
-    collect_neighbors_ids(start, pred, radius)
-}
-
-fn collect_downstream_ids(end: u128, succ: &HashMap<u128, Vec<u128>>, radius: usize) -> Vec<u128> {
-    collect_neighbors_ids(end, succ, radius)
-}
+// ---------- Context helpers for JSON ----------
 
 fn collect_nodes_for_bubble_context(
     inside: &HashSet<u128>,
@@ -917,7 +950,7 @@ fn build_record_json(
     edge_cov: &HashMap<(u128, u128), usize>,
     reftext: &RefText,
     radius_context: usize,
-    flank_radius: usize,
+    flank_kmers: usize,     // <- preset number of kmers to export per side
     max_paths: usize,
 ) -> Option<String> {
     if bubble.ends.len() != 2 {
@@ -943,15 +976,19 @@ fn build_record_json(
         enumerate_paths_bidir(start, end, &superedges, segments, k, max_paths);
 
     // Label with adaptive flanks + KMP
-    let (label_opt, flank_used_bp) = if paths_vec.is_empty() {
+    let (label_opt, _flank_used_bp) = if paths_vec.is_empty() {
         (None, 0usize)
     } else {
         label_with_adaptive_flanks(&seqs_vec, start, end, succ, pred, segments, k, reftext)
     };
 
-    // 1-hop context lists (IDs -> seqs later)
-    let upstream_ids = collect_upstream_ids(start, pred, flank_radius);
-    let downstream_ids = collect_downstream_ids(end, succ, flank_radius);
+    // ------- Preset flanks to export: greedily take exactly N neighbors if available -------
+    let upstream_ids: Vec<u128> = collect_flanks_greedy(
+        start, /*forward=*/false, succ, pred, segments, edge_cov, flank_kmers
+    );
+    let downstream_ids: Vec<u128> = collect_flanks_greedy(
+        end, /*forward=*/true, succ, pred, segments, edge_cov, flank_kmers
+    );
 
     // Build JSON record (ID-free)
     let mut rec = BubbleRecord {
@@ -997,9 +1034,8 @@ fn build_record_json(
         }
     }
 
-
     // Serialize edges with endpoint sequences only
-    for (i, e) in superedges.iter().enumerate() {
+    for e in superedges.iter() {
         let len_nodes = e.chain.len();
         let len_bp = k + len_nodes.saturating_sub(1);
 
@@ -1036,10 +1072,10 @@ fn main() {
     let out_path = &args[4];
 
     // Tunables
-    let radius_context: usize = 5; // nodes to include around bubble for compaction
-    let flank_radius: usize = 1;   // explicit 1-hop context exported in JSON
-    let max_paths: usize = 256;    // candidate cap per bubble
-    const BATCH: usize = 1000;     // bubbles per parallel batch (tweak for memory/CPU)
+    let radius_context: usize = 5;   // nodes to include around bubble for compaction
+    let flank_kmers: usize = 5;      // <- preset number of upstream/downstream kmers to export
+    let max_paths: usize = 256;      // candidate cap per bubble
+    const BATCH: usize = 1000;       // bubbles per parallel batch (tweak for memory/CPU)
 
     // Load graph + reference
     let (segments, links, edge_cov) = parse_gfa(gfa_path);
@@ -1120,7 +1156,7 @@ fn main() {
                     .map_init(|| pb_for_threads.clone(), |pbl, (i, bub)| {
                         let out = build_record_json(
                             bub, k, &succ, &pred, &segments, &edge_cov, &reftext,
-                            radius_context, flank_radius, max_paths,
+                            radius_context, flank_kmers, max_paths,
                         );
                         pbl.inc(1); // progress: one bubble done (success or skip)
                         (i, out)
@@ -1148,7 +1184,7 @@ fn main() {
             .map_init(|| pb_for_threads.clone(), |pbl, (i, bub)| {
                 let out = build_record_json(
                     bub, k, &succ, &pred, &segments, &edge_cov, &reftext,
-                    radius_context, flank_radius, max_paths,
+                    radius_context, flank_kmers, max_paths,
                 );
                 pbl.inc(1);
                 (i, out)
