@@ -4,7 +4,9 @@
 // - Compact bubbles to superedges (unitigs) with coverage aggregates.
 // - Split unitigs at bubble endpoints.
 // - Enumerate paths bidirectionally with orientation-safe sequence assembly.
-// - Label via adaptive flank extension + exact KMP on both strands.
+// - Primary labeler: reference-anchored walk between endpoint k-mers (both strands).
+//   * Falls back to Minimal Unique Extension (MUE) on reference when endpoints are repetitive.
+// - Fallback labeler: adaptive flank extension + exact KMP on both strands.
 // - **IDs are removed** from the output. Upstream/downstream and endpoints are sequences.
 // - cov_min / cov_mean prefer EC:i per link; fallback to min(KC:u, KC:v).
 // - Parallelized over bubbles using Rayon (batched to keep memory bounded).
@@ -17,19 +19,14 @@
 //   {
 //     bubble_id, k,
 //     start_seq, end_seq,
-//     upstream: [seq,...], downstream: [seq,...],            // <- preset greedy flanks (N=5)
+//     upstream: [seq,...], downstream: [seq,...],
 //     upstream_nodes: [{seq,cov},...], downstream_nodes: [{seq,cov},...],
-//     nodes: [{seq,cov},...],                  // supernodes in bubble+context
+//     nodes: [{seq,cov},...],
 //     edges: [{source_seq,target_seq,len_nodes,len_bp,cov_min,cov_mean}, ...],
 //     paths: [[edge_idx,...], ...],
-//     label_path: <usize|null>
+//     label_path: <usize|null>,
+//     label_reason: <string|null>        // "unique_ref_walk", "adaptive_kmp", "ambiguous_ref_multi_hit", "no_ref_match"
 //   }
-//
-// Cargo.toml (add):
-//   indicatif = "0.17"
-//   rayon = "1.10"
-//   serde = { version = "1", features = ["derive"] }
-//   serde_json = "1"
 
 use indicatif::{ProgressBar, ProgressStyle};
 use rayon::prelude::*;
@@ -85,27 +82,22 @@ struct BubbleRecord {
     bubble_id: usize,
     k: usize,
 
-    // endpoints as sequences (no IDs)
     start_seq: String,
     end_seq: String,
 
-    // preset flanks (nearest-first, greedy over graph)
     upstream: Vec<String>,
     downstream: Vec<String>,
 
-    // context nodes with coverage (no IDs)
     upstream_nodes: Vec<NodeFeature>,
     downstream_nodes: Vec<NodeFeature>,
 
-    // supernodes inside bubble+context
     nodes: Vec<NodeFeature>,
 
-    // compact superedges (endpoint sequences only)
     edges: Vec<EdgeFeature>,
 
-    // edge-index paths start->end
     paths: Vec<Vec<usize>>,
     label_path: Option<usize>,
+    label_reason: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -164,25 +156,21 @@ fn parse_gfa(
         let cols: Vec<&str> = line.split('\t').collect();
         match cols.get(0).copied() {
             Some("S") => {
-                if cols.len() < 3 {
-                    continue;
-                }
+                if cols.len() < 3 { continue; }
                 let id: u128 = cols[1]
                     .parse()
                     .unwrap_or_else(|_| panic!("Non-numeric segment id: {}", cols[1]));
                 let seq = cols[2].to_string();
                 let cov = cols.iter()
-                .find_map(|f| {
-                    let lf = f.to_ascii_lowercase();
-                    lf.strip_prefix("kc:i:").and_then(|x| x.parse::<usize>().ok())
-                })
-                .unwrap_or(0);
+                    .find_map(|f| {
+                        let lf = f.to_ascii_lowercase();
+                        lf.strip_prefix("kc:i:").and_then(|x| x.parse::<usize>().ok())
+                    })
+                    .unwrap_or(0);
                 segs.insert(id, Segment { id, seq, cov });
             }
             Some("L") => {
-                if cols.len() < 6 {
-                    continue;
-                }
+                if cols.len() < 6 { continue; }
                 let from: u128 = cols[1]
                     .parse()
                     .unwrap_or_else(|_| panic!("Non-numeric link from: {}", cols[1]));
@@ -211,12 +199,8 @@ fn build_adj(
     let mut succ: HashMap<u128, Vec<u128>> = segs.keys().map(|&k| (k, Vec::new())).collect();
     let mut pred: HashMap<u128, Vec<u128>> = segs.keys().map(|&k| (k, Vec::new())).collect();
     for l in links {
-        if let Some(v) = succ.get_mut(&l.from) {
-            v.push(l.to);
-        }
-        if let Some(v) = pred.get_mut(&l.to) {
-            v.push(l.from);
-        }
+        if let Some(v) = succ.get_mut(&l.from) { v.push(l.to); }
+        if let Some(v) = pred.get_mut(&l.to)   { v.push(l.from); }
     }
     (succ, pred)
 }
@@ -225,6 +209,7 @@ fn build_adj(
 
 fn compact_with_chains(
     nodes: &HashSet<u128>,
+//
     succ: &HashMap<u128, Vec<u128>>,
     pred: &HashMap<u128, Vec<u128>>,
     edge_cov: &HashMap<(u128, u128), usize>,
@@ -268,9 +253,7 @@ fn compact_with_chains(
     for &u in &supernodes {
         if let Some(vs0) = succ.get(&u) {
             for &v0 in vs0 {
-                if !nodes.contains(&v0) {
-                    continue;
-                }
+                if !nodes.contains(&v0) { continue; }
                 let mut chain = vec![u, v0];
                 let mut cur = v0;
 
@@ -281,21 +264,15 @@ fn compact_with_chains(
                 while nodes.contains(&cur) && indeg[&cur] == 1 && outdeg[&cur] == 1 {
                     let next = succ.get(&cur).and_then(|v| v.first()).copied();
                     if let Some(nxt) = next {
-                        if !nodes.contains(&nxt) {
-                            break;
-                        }
+                        if !nodes.contains(&nxt) { break; }
                         let ec = link_cov(cur, nxt);
                         cov_min = cmp::min(cov_min, ec);
                         cov_sum += ec;
                         edges_cnt += 1;
                         chain.push(nxt);
                         cur = nxt;
-                        if indeg[&cur] != 1 || outdeg[&cur] != 1 {
-                            break;
-                        }
-                    } else {
-                        break;
-                    }
+                        if indeg[&cur] != 1 || outdeg[&cur] != 1 { break; }
+                    } else { break; }
                 }
                 out.push(SuperEdge {
                     from: u,
@@ -377,29 +354,20 @@ fn assemble_chain_sequence(
     segments: &HashMap<u128, Segment>,
     k: usize,
 ) -> Option<String> {
-    if chain.is_empty() {
-        return None;
-    }
+    if chain.is_empty() { return None; }
     // try direct
     let mut seq = segments[&chain[0]].seq.clone();
     let mut ok = true;
     for node in chain.iter().skip(1) {
         let s = &segments[node].seq;
-        if !append_next_kmer(&mut seq, s, k) {
-            ok = false;
-            break;
-        }
+        if !append_next_kmer(&mut seq, s, k) { ok = false; break; }
     }
-    if ok {
-        return Some(seq);
-    }
+    if ok { return Some(seq); }
     // retry with RC of first
     let mut seq2 = revcomp(&segments[&chain[0]].seq);
     for node in chain.iter().skip(1) {
         let s = &segments[node].seq;
-        if !append_next_kmer(&mut seq2, s, k) {
-            return None;
-        }
+        if !append_next_kmer(&mut seq2, s, k) { return None; }
     }
     Some(seq2)
 }
@@ -412,9 +380,7 @@ fn append_chain_to_sequence(
 ) -> bool {
     for node in chain.iter().skip(1) {
         let s = &segments[node].seq;
-        if !append_next_kmer(assembled, s, k) {
-            return false;
-        }
+        if !append_next_kmer(assembled, s, k) { return false; }
     }
     true
 }
@@ -454,17 +420,13 @@ fn enumerate_paths_bidir(
 
         let guard_max_steps = 2000usize;
         while let Some((at, idxs, seq)) = stack.pop() {
-            if paths.len() >= max_paths {
-                break;
-            }
+            if paths.len() >= max_paths { break; }
             if at == t {
                 paths.push(idxs.clone());
                 seqs.push(seq.clone());
                 continue;
             }
-            if idxs.len() > guard_max_steps {
-                continue;
-            }
+            if idxs.len() > guard_max_steps { continue; }
             if let Some(eidxs) = from_map.get(&at) {
                 for &ei in eidxs {
                     let e = &edges[ei];
@@ -522,23 +484,15 @@ fn gather_unique_chain(
     let mut chain: Vec<u128> = vec![seed];
     let mut cur = seed;
     loop {
-        if chain.len() >= nodes_cap {
-            break;
-        }
+        if chain.len() >= nodes_cap { break; }
         let (nexts, cond) = if forward {
-            (
-                succ.get(&cur).cloned().unwrap_or_default(),
-                outdeg.get(&cur).copied().unwrap_or(0) == 1,
-            )
+            (succ.get(&cur).cloned().unwrap_or_default(),
+             outdeg.get(&cur).copied().unwrap_or(0) == 1)
         } else {
-            (
-                pred.get(&cur).cloned().unwrap_or_default(),
-                indeg.get(&cur).copied().unwrap_or(0) == 1,
-            )
+            (pred.get(&cur).cloned().unwrap_or_default(),
+             indeg.get(&cur).copied().unwrap_or(0) == 1)
         };
-        if !cond || nexts.len() != 1 {
-            break;
-        }
+        if !cond || nexts.len() != 1 { break; }
         let nx = nexts[0];
         chain.push(nx);
         cur = nx;
@@ -551,10 +505,7 @@ fn sequence_for_nodes(
     segments: &HashMap<u128, Segment>,
     k: usize,
 ) -> Option<(String, usize)> {
-    if nodes.is_empty() {
-        return Some(("".to_string(), 0));
-    }
-    // try forward
+    if nodes.is_empty() { return Some(("".to_string(), 0)); }
     let mut seq = segments[&nodes[0]].seq.clone();
     for node in nodes.iter().skip(1) {
         let s = &segments[node].seq;
@@ -563,9 +514,7 @@ fn sequence_for_nodes(
             let mut seq2 = revcomp(&segments[&nodes[0]].seq);
             for node2 in nodes.iter().skip(1) {
                 let s2 = &segments[node2].seq;
-                if !append_next_kmer(&mut seq2, s2, k) {
-                    return None;
-                }
+                if !append_next_kmer(&mut seq2, s2, k) { return None; }
             }
             let extra2 = if seq2.len() >= k { seq2.len() - k } else { 0 };
             return Some((seq2, extra2));
@@ -587,37 +536,19 @@ fn compute_flanks(
     max_bp: usize,
 ) -> (String, String) {
     let left_nodes_rev = gather_unique_chain(
-        start,
-        /*forward=*/false,
-        succ,
-        pred,
-        indeg,
-        outdeg,
+        start, false, succ, pred, indeg, outdeg,
         max_bp / cmp::max(k, 1) + 2,
     );
     let left_nodes: Vec<u128> = left_nodes_rev.into_iter().rev().collect();
     let (left_seq_full, _) = sequence_for_nodes(&left_nodes, segments, k).unwrap_or(("".to_string(), 0));
     let right_nodes = gather_unique_chain(
-        end,
-        /*forward=*/true,
-        succ,
-        pred,
-        indeg,
-        outdeg,
+        end, true, succ, pred, indeg, outdeg,
         max_bp / cmp::max(k, 1) + 2,
     );
     let (right_seq_full, _) = sequence_for_nodes(&right_nodes, segments, k).unwrap_or(("".to_string(), 0));
 
-    let left_bp = if left_seq_full.len() > k {
-        &left_seq_full[..left_seq_full.len() - k]
-    } else {
-        ""
-    };
-    let right_bp = if right_seq_full.len() > k {
-        &right_seq_full[k..]
-    } else {
-        ""
-    };
+    let left_bp = if left_seq_full.len() > k { &left_seq_full[..left_seq_full.len() - k] } else { "" };
+    let right_bp = if right_seq_full.len() > k { &right_seq_full[k..] } else { "" };
     (left_bp.to_string(), right_bp.to_string())
 }
 
@@ -645,9 +576,7 @@ fn kmp_build(pat: &str) -> Vec<usize> {
 }
 
 fn kmp_search_all(pat: &str, text: &str) -> Vec<usize> {
-    if pat.is_empty() {
-        return vec![];
-    }
+    if pat.is_empty() { return vec![]; }
     let lps = kmp_build(pat);
     let pb = pat.as_bytes();
     let tb = text.as_bytes();
@@ -656,8 +585,7 @@ fn kmp_search_all(pat: &str, text: &str) -> Vec<usize> {
     let mut j = 0usize;
     while i < tb.len() {
         if tb[i] == pb[j] {
-            i += 1;
-            j += 1;
+            i += 1; j += 1;
             if j == pb.len() {
                 res.push(i - j);
                 j = lps[j - 1];
@@ -707,17 +635,154 @@ impl RefText {
         }
         let chroms = chroms_raw
             .into_iter()
-            .map(|(n, s)| Chrom {
-                name: n,
-                seq: s.clone(),
-                rc_seq: revcomp(&s),
-            })
+            .map(|(n, s)| Chrom { name: n, seq: s.clone(), rc_seq: revcomp(&s) })
             .collect();
         Self { chroms }
     }
 }
 
-// ---------- Labeling with adaptive flanks & KMP ----------
+// ---------- Reference-anchored helpers ----------
+
+#[derive(Clone, Copy, Debug)]
+struct Pos { chrom: usize, pos: usize, rev: bool } // rev=false => forward strand
+
+fn all_kmer_pos(reftext: &RefText, kmer: &str) -> Vec<Pos> {
+    fn scan(hay: &str, needle: &str, chrom: usize, rev: bool, out: &mut Vec<Pos>) {
+        if needle.is_empty() || hay.len() < needle.len() { return; }
+        let nb = needle.as_bytes();
+        let hb = hay.as_bytes();
+        let m = nb.len();
+        let mut i = 0usize;
+        while i + m <= hb.len() {
+            if &hb[i..i+m] == nb { out.push(Pos { chrom, pos: i, rev }); }
+            i += 1;
+        }
+    }
+    let mut out = Vec::new();
+    let rc = revcomp(kmer);
+    for (i, c) in reftext.chroms.iter().enumerate() {
+        scan(&c.seq, kmer, i, false, &mut out);
+        scan(&c.rc_seq, &rc, i, true, &mut out);
+    }
+    out
+}
+
+fn ref_substr_between(reftext: &RefText, a: Pos, b: Pos, k: usize) -> Option<String> {
+    if a.chrom != b.chrom || a.rev != b.rev { return None; }
+    let c = &reftext.chroms[a.chrom];
+    if !a.rev {
+        if a.pos > b.pos { return None; }
+        let start = a.pos;
+        let end_excl = b.pos + k;
+        if end_excl <= c.seq.len() { return Some(c.seq[start..end_excl].to_string()); }
+    } else {
+        if a.pos > b.pos { return None; }
+        let start = a.pos;
+        let end_excl = b.pos + k;
+        if end_excl <= c.rc_seq.len() { return Some(c.rc_seq[start..end_excl].to_string()); }
+    }
+    None
+}
+
+fn minimal_unique_extension(
+    reftext: &RefText,
+    base_kmer: &str,
+    extend_right: bool, // true for start(+), false for end(+)
+    max_ext: usize,
+) -> Option<(usize, Pos)> {
+    let mut occ = all_kmer_pos(reftext, base_kmer);
+    if occ.is_empty() { return None; }
+    if occ.len() == 1 { return Some((0, occ[0])); }
+
+    for ext in 1..=max_ext {
+        use std::collections::HashMap;
+        let mut groups: HashMap<(usize,u8,bool), Vec<Pos>> = HashMap::new();
+        for p in occ.iter().copied() {
+            let c = &reftext.chroms[p.chrom];
+            let next_base = if !p.rev {
+                if extend_right {
+                    c.seq.as_bytes().get(p.pos + base_kmer.len() + (ext-1)).copied()
+                } else {
+                    if p.pos >= ext { c.seq.as_bytes().get(p.pos - ext).copied() } else { None }
+                }
+            } else {
+                if extend_right {
+                    c.rc_seq.as_bytes().get(p.pos + base_kmer.len() + (ext-1)).copied()
+                } else {
+                    if p.pos >= ext { c.rc_seq.as_bytes().get(p.pos - ext).copied() } else { None }
+                }
+            };
+            if let Some(b) = next_base {
+                groups.entry((p.chrom,b,p.rev)).or_default().push(p);
+            }
+        }
+        let mut unique_groups: Vec<Pos> = Vec::new();
+        for v in groups.values() {
+            if v.len() == 1 { unique_groups.push(v[0]); }
+        }
+        if unique_groups.len() == 1 {
+            return Some((ext, unique_groups[0]));
+        }
+        occ = groups.values().flat_map(|v| v.clone()).collect();
+        if occ.len() == 1 { return Some((ext, occ[0])); }
+    }
+    None
+}
+
+fn label_with_ref_walk(
+    candidate_seqs: &[String],
+    start_seq: &str,
+    end_seq: &str,
+    reftext: &RefText,
+    k: usize,
+    try_mue: bool,
+) -> (Option<usize>, String) {
+    let mut starts = all_kmer_pos(reftext, start_seq);
+    let mut ends   = all_kmer_pos(reftext, end_seq);
+
+    if try_mue && (starts.len() > 8 || ends.len() > 8) {
+        if let Some((_e, p)) = minimal_unique_extension(reftext, start_seq, true, 4096) {
+            starts = vec![p];
+        }
+        if let Some((_e, p)) = minimal_unique_extension(reftext, end_seq, false, 4096) {
+            ends = vec![p];
+        }
+    }
+
+    let mut matches: Vec<usize> = Vec::new();
+    for s in &starts {
+        for e in &ends {
+            if s.chrom != e.chrom || s.rev != e.rev { continue; }
+            if let Some(ref_sub) = ref_substr_between(reftext, *s, *e, k) {
+                let refb = ref_sub.as_bytes();
+                for (i, cand) in candidate_seqs.iter().enumerate() {
+                    let cb = cand.as_bytes();
+                    if refb.len() == cb.len() && refb == cb {
+                        matches.push(i);
+                    } else {
+                        // also try reverse-complement of candidate
+                        let rc = revcomp(cand);
+                        if refb.len() == rc.len() && refb == rc.as_bytes() {
+                            matches.push(i);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    matches.sort_unstable();
+    matches.dedup();
+
+    if matches.len() == 1 {
+        (Some(matches[0]), "unique_ref_walk".into())
+    } else if matches.is_empty() {
+        (None, "no_ref_match".into())
+    } else {
+        (None, "ambiguous_ref_multi_hit".into())
+    }
+}
+
+// ---------- Labeling with adaptive flanks & KMP (fallback) ----------
 
 fn label_with_adaptive_flanks(
     candidate_seqs: &[String], // per path (already orientation-safe within bubble)
@@ -739,38 +804,33 @@ fn label_with_adaptive_flanks(
     for delta in flanks {
         let left_tail = if left_full.len() > delta {
             &left_full[left_full.len() - delta..]
-        } else {
-            &left_full[..]
-        };
+        } else { &left_full[..] };
         let right_head = if right_full.len() > delta {
             &right_full[..delta]
-        } else {
-            &right_full[..]
-        };
+        } else { &right_full[..] };
 
-        // total hits per candidate across all chroms (both strands)
         let mut hits_per_path: Vec<usize> = Vec::with_capacity(candidate_seqs.len());
         for seq in candidate_seqs {
-            let extended = format!("{left}{mid}{right}", left = left_tail, mid = seq, right = right_head);
+            // try both strands by checking seq and revcomp(seq) as separate queries
+            let extended_f = format!("{left}{mid}{right}", left = left_tail, mid = seq, right = right_head);
+            let extended_r = format!("{left}{mid}{right}", left = left_tail, mid = revcomp(seq), right = right_head);
             let mut total = 0usize;
             for chrom in reftext.chroms.iter() {
-                total += kmp_search_all(&extended, &chrom.seq).len();
-                total += kmp_search_all(&extended, &chrom.rc_seq).len();
+                total += kmp_search_all(&extended_f, &chrom.seq).len();
+                total += kmp_search_all(&extended_f, &chrom.rc_seq).len();
+                total += kmp_search_all(&extended_r, &chrom.seq).len();
+                total += kmp_search_all(&extended_r, &chrom.rc_seq).len();
             }
             hits_per_path.push(total);
         }
 
-        // Unique if exactly one path has exactly one hit, and all others have zero.
         let mut unique_idx: Option<usize> = None;
         let mut bad = false;
         for (i, &h) in hits_per_path.iter().enumerate() {
             match h {
                 0 => {}
-                1 => {
-                    if unique_idx.is_none() { unique_idx = Some(i); }
-                    else { bad = true; break; } // two paths with hits -> ambiguous
-                }
-                _ => { bad = true; break; }   // multi-hits for a path -> ambiguous
+                1 => { if unique_idx.is_none() { unique_idx = Some(i); } else { bad = true; break; } }
+                _ => { bad = true; break; }
             }
         }
         if !bad {
@@ -778,9 +838,7 @@ fn label_with_adaptive_flanks(
                 return (Some(i), delta * 2);
             }
         }
-        // else grow flanks and retry
     }
-
     (None, max_flank_bp * 2)
 }
 
@@ -799,9 +857,7 @@ fn best_neighbor(
     } else {
         pred.get(&cur).cloned().unwrap_or_default()
     };
-    if cand.is_empty() {
-        return None;
-    }
+    if cand.is_empty() { return None; }
     // choose by: edge EC (desc), then node KC (desc), then node id (asc) for determinism
     let mut best_id: Option<u128> = None;
     let mut best_key: Option<(usize, usize, u128)> = None; // (ec, kc, id)
@@ -828,7 +884,7 @@ fn best_neighbor(
 
 fn collect_flanks_greedy(
     seed: u128,
-    forward: bool, // upstream: false (use predecessors); downstream: true (use successors)
+    forward: bool,
     succ: &HashMap<u128, Vec<u128>>,
     pred: &HashMap<u128, Vec<u128>>,
     segments: &HashMap<u128, Segment>,
@@ -843,15 +899,11 @@ fn collect_flanks_greedy(
 
     for _ in 0..n {
         if let Some(nx) = best_neighbor(cur, forward, succ, pred, segments, edge_cov) {
-            if seen.contains(&nx) {
-                break; // avoid tiny cycles
-            }
-            out.push(nx);   // nearest-first
+            if seen.contains(&nx) { break; } // avoid tiny cycles
+            out.push(nx);
             seen.insert(nx);
             cur = nx;
-        } else {
-            break;
-        }
+        } else { break; }
     }
     out
 }
@@ -876,9 +928,7 @@ fn collect_nodes_for_bubble_context(
     dq.push_back((start, 0usize));
     seen_u.insert(start);
     while let Some((u, d)) = dq.pop_front() {
-        if d == radius {
-            continue;
-        }
+        if d == radius { continue; }
         if let Some(ps) = pred.get(&u) {
             for &p in ps {
                 if seen_u.insert(p) {
@@ -895,9 +945,7 @@ fn collect_nodes_for_bubble_context(
     dq2.push_back((end, 0usize));
     seen_d.insert(end);
     while let Some((u, d)) = dq2.pop_front() {
-        if d == radius {
-            continue;
-        }
+        if d == radius { continue; }
         if let Some(vs) = succ.get(&u) {
             for &v in vs {
                 if seen_d.insert(v) {
@@ -918,7 +966,7 @@ fn count_bubbles_file(path: &str) -> usize {
     let stream = Deserializer::from_reader(reader).into_iter::<Value>();
     let mut total = 0usize;
     for val in stream {
-        let Ok(v) = val else { continue }; // skip bad lines
+        let Ok(v) = val else { continue };
         if v.is_object() {
             let map = v.as_object().unwrap();
             for vv in map.values() {
@@ -950,14 +998,12 @@ fn build_record_json(
     edge_cov: &HashMap<(u128, u128), usize>,
     reftext: &RefText,
     radius_context: usize,
-    flank_kmers: usize,     // <- preset number of kmers to export per side
+    flank_kmers: usize,
     max_paths: usize,
 ) -> Option<String> {
-    if bubble.ends.len() != 2 {
-        return None;
-    }
+    if bubble.ends.len() != 2 { return None; }
     let start: u128 = parse_u128(&bubble.ends[0]);
-    let end: u128 = parse_u128(&bubble.ends[1]);
+    let end: u128   = parse_u128(&bubble.ends[1]);
 
     // Induced subgraph nodes (bubble + context)
     let inside: HashSet<u128> = bubble.inside.iter().map(|s| parse_u128(s)).collect();
@@ -975,12 +1021,36 @@ fn build_record_json(
     let (paths_vec, seqs_vec, _reversed) =
         enumerate_paths_bidir(start, end, &superedges, segments, k, max_paths);
 
-    // Label with adaptive flanks + KMP
-    let (label_opt, _flank_used_bp) = if paths_vec.is_empty() {
-        (None, 0usize)
-    } else {
-        label_with_adaptive_flanks(&seqs_vec, start, end, succ, pred, segments, k, reftext)
-    };
+    // --- Labeling cascade ---
+    let mut label_opt: Option<usize> = None;
+    let mut label_reason: Option<String> = None;
+
+    if !seqs_vec.is_empty() {
+        // 1) Reference-anchored walk (with MUE if endpoints are repetitive)
+        let (lab1, why1) = label_with_ref_walk(
+            &seqs_vec,
+            &segments[&start].seq,
+            &segments[&end].seq,
+            reftext,
+            k,
+            /*try_mue=*/true
+        );
+        if lab1.is_some() {
+            label_opt = lab1;
+            label_reason = Some(why1);
+        } else {
+            // 2) Fallback: adaptive flanks + KMP (both strands)
+            let (lab2, _bp) = label_with_adaptive_flanks(
+                &seqs_vec, start, end, succ, pred, segments, k, reftext
+            );
+            if lab2.is_some() {
+                label_opt = lab2;
+                label_reason = Some("adaptive_kmp".into());
+            } else {
+                label_reason = Some(why1); // keep "no_ref_match"/"ambiguous_ref_multi_hit"
+            }
+        }
+    }
 
     // ------- Preset flanks to export: greedily take exactly N neighbors if available -------
     let upstream_ids: Vec<u128> = collect_flanks_greedy(
@@ -992,45 +1062,34 @@ fn build_record_json(
 
     // Build JSON record (ID-free)
     let mut rec = BubbleRecord {
-        bubble_id: bubble.id, // keep BubbleGun id for bookkeeping
+        bubble_id: bubble.id,
         k,
-
         start_seq: segments.get(&start).map(|s| s.seq.clone()).unwrap_or_default(),
         end_seq:   segments.get(&end).map(|s| s.seq.clone()).unwrap_or_default(),
 
         upstream: upstream_ids
-            .iter()
-            .filter_map(|nid| segments.get(nid).map(|s| s.seq.clone()))
-            .collect(),
+            .iter().filter_map(|nid| segments.get(nid).map(|s| s.seq.clone())).collect(),
         downstream: downstream_ids
-            .iter()
-            .filter_map(|nid| segments.get(nid).map(|s| s.seq.clone()))
-            .collect(),
+            .iter().filter_map(|nid| segments.get(nid).map(|s| s.seq.clone())).collect(),
 
         upstream_nodes: upstream_ids
-            .iter()
-            .filter_map(|nid| segments.get(nid))
-            .map(|s| NodeFeature { seq: s.seq.clone(), cov: s.cov })
-            .collect(),
+            .iter().filter_map(|nid| segments.get(nid))
+            .map(|s| NodeFeature { seq: s.seq.clone(), cov: s.cov }).collect(),
         downstream_nodes: downstream_ids
-            .iter()
-            .filter_map(|nid| segments.get(nid))
-            .map(|s| NodeFeature { seq: s.seq.clone(), cov: s.cov })
-            .collect(),
+            .iter().filter_map(|nid| segments.get(nid))
+            .map(|s| NodeFeature { seq: s.seq.clone(), cov: s.cov }).collect(),
 
         nodes: Vec::new(),
         edges: Vec::new(),
         paths: paths_vec.clone(),
-        label_path: label_opt
+        label_path: label_opt,
+        label_reason,
     };
 
     // Supernodes (as sequences)
     for &nid in &supernodes0 {
         if let Some(seg) = segments.get(&nid) {
-            rec.nodes.push(NodeFeature {
-                seq: seg.seq.clone(),
-                cov: seg.cov,
-            });
+            rec.nodes.push(NodeFeature { seq: seg.seq.clone(), cov: seg.cov });
         }
     }
 
@@ -1072,10 +1131,10 @@ fn main() {
     let out_path = &args[4];
 
     // Tunables
-    let radius_context: usize = 5;   // nodes to include around bubble for compaction
-    let flank_kmers: usize = 5;      // <- preset number of upstream/downstream kmers to export
-    let max_paths: usize = 256;      // candidate cap per bubble
-    const BATCH: usize = 1000;       // bubbles per parallel batch (tweak for memory/CPU)
+    let radius_context: usize = 5;  // nodes to include around bubble for compaction
+    let flank_kmers: usize = 5;     // preset number of upstream/downstream kmers to export
+    let max_paths: usize = 256;     // candidate cap per bubble
+    const BATCH: usize = 1000;      // bubbles per parallel batch (tweak for memory/CPU)
 
     // Load graph + reference
     let (segments, links, edge_cov) = parse_gfa(gfa_path);
@@ -1115,10 +1174,7 @@ fn main() {
 
     let stream = Deserializer::from_reader(reader).into_iter::<Value>();
     for val in stream {
-        let v = match val {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
+        let v = match val { Ok(v) => v, Err(_) => continue };
 
         // Normalize to list<Bubble>
         let mut bubbles: Vec<Bubble> = Vec::new();
@@ -1130,9 +1186,7 @@ fn main() {
             }
         } else if v.is_array() {
             if let Ok(bcs) = serde_json::from_value::<Vec<BubbleChain>>(v.clone()) {
-                for bc in bcs {
-                    bubbles.extend(bc.bubbles);
-                }
+                for bc in bcs { bubbles.extend(bc.bubbles); }
             } else if let Ok(bs) = serde_json::from_value::<Vec<Bubble>>(v.clone()) {
                 bubbles.extend(bs);
             } else {
@@ -1141,7 +1195,6 @@ fn main() {
         } else if let Ok(bc) = serde_json::from_value::<BubbleChain>(v.clone()) {
             bubbles.extend(bc.bubbles);
         } else {
-            // Unknown shape, skip
             continue;
         }
 
@@ -1158,7 +1211,7 @@ fn main() {
                             bub, k, &succ, &pred, &segments, &edge_cov, &reftext,
                             radius_context, flank_kmers, max_paths,
                         );
-                        pbl.inc(1); // progress: one bubble done (success or skip)
+                        pbl.inc(1);
                         (i, out)
                     })
                     .filter_map(|(i, out)| out.map(|s| (i, s)))
