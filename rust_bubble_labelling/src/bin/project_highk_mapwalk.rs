@@ -1,3 +1,30 @@
+//! # High-k Map-Walk Labeling (k-mer Index Traversal)
+//!
+//! This tool labels BubbleGun bubbles by walking candidate **low-k** path
+//! sequences through a **high-k** de Bruijn graph using a compact k-mer index.
+//!
+//! ## Pipeline
+//! 1) Read low-k GFA and enumerate orientation-safe candidate sequences per bubble
+//!    (compacting chains to speed enumeration).
+//! 2) Build a high-k index: k-mer→nodes and successor adjacency.
+//! 3) For each candidate sequence (both strands), **map-walk** it through the high-k graph,
+//!    counting the number of valid path continuations (bounded frontier).
+//! 4) Label a bubble if there is a single winning candidate.
+//!
+//! ## Winner rule
+//! - Default: winner must be unique and have exactly **1** occurrence.
+//! - With `--allow-multi-occurrence`, winner may have `> 1` occurrences (still must be unique).
+//!
+//! ## Usage
+//! ```text
+//! cargo run --release --bin project_highk_mapwalk -- \
+//!   --low-gfa ecoli_21_graph.gfa \
+//!   --bubbles ecoli_unlabeled_2.json \
+//!   --high-gfa ecoli_41_graph.gfa \
+//!   --out ecoli_dataset_missing_mapwalk.jsonl \
+//!   [--allow-multi-occurrence] [--max-frontier 512] [--max-paths 1024]
+//! ```
+
 use serde::Deserialize;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -7,6 +34,7 @@ use std::io::{BufRead, BufReader, Write};
 
 // ====== Small utils ======
 
+/// Reverse-complement a DNA string (A↔T, C↔G; others→N).
 fn revcomp(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.bytes().rev() {
@@ -20,17 +48,23 @@ fn revcomp(s: &str) -> String {
     }
     out
 }
+
+/// Parse a decimal string into `u128`, panicking on non-numeric input.
 fn parse_u128(s: &str) -> u128 {
     s.parse::<u128>().unwrap_or_else(|_| panic!("Non-numeric id: {s}"))
 }
 
 // ====== Low-k graph & bubble handling (candidate enumeration) ======
 
+/// GFA `S` line.
 #[derive(Debug)]
 struct Segment { id: u128, seq: String }
+
+/// GFA `L` line (from → to).
 #[derive(Debug, Clone)]
 struct Link { from: u128, to: u128 }
 
+/// Parse a GFA into segments and link list.
 fn parse_gfa(path: &str) -> (HashMap<u128, Segment>, Vec<Link>) {
     let f = File::open(path).expect("open GFA");
     let rdr = BufReader::new(f);
@@ -57,6 +91,8 @@ fn parse_gfa(path: &str) -> (HashMap<u128, Segment>, Vec<Link>) {
     }
     (segs, links)
 }
+
+/// Build successor and predecessor adjacency maps from segments and links.
 fn build_adj(
     segs: &HashMap<u128, Segment>,
     links: &[Link],
@@ -70,9 +106,15 @@ fn build_adj(
     (succ, pred)
 }
 
-// compact chains between non-1/1-degree nodes to speed path enumeration
+/// Compacted chain (superedge) between non-1/1-degree hubs.
 #[derive(Clone)]
 struct SuperEdge { from: u128, to: u128, chain: Vec<u128> }
+
+/// Compact chains between nodes whose `(in≠1) ∨ (out≠1)` to accelerate path enumeration.
+///
+/// Returns:
+/// - list of compacted [`SuperEdge`]s,
+/// - list of hub node ids.
 fn compact_with_chains(
     nodes: &HashSet<u128>,
     succ: &HashMap<u128, Vec<u128>>,
@@ -109,6 +151,8 @@ fn compact_with_chains(
     }
     (out, hubs)
 }
+
+/// Build index from `from` node id to edge indices.
 fn index_from(edges: &[SuperEdge]) -> HashMap<u128, Vec<usize>> {
     let mut m: HashMap<u128, Vec<usize>> = HashMap::new();
     for (i, e) in edges.iter().enumerate() {
@@ -116,6 +160,9 @@ fn index_from(edges: &[SuperEdge]) -> HashMap<u128, Vec<usize>> {
     }
     m
 }
+
+/// Append the next *k*-mer `next_seq` to `assembled` if it overlaps by `k-1` bp.
+/// Falls back to RC of `next_seq` if needed.
 fn append_next_kmer(assembled: &mut String, next_seq: &str, k: usize) -> bool {
     if assembled.as_bytes()[(assembled.len() - (k - 1))..] == next_seq.as_bytes()[..(k - 1)] {
         assembled.push(next_seq.as_bytes()[k - 1] as char);
@@ -130,6 +177,9 @@ fn append_next_kmer(assembled: &mut String, next_seq: &str, k: usize) -> bool {
         }
     }
 }
+
+/// Assemble a compacted chain into a sequence, trying forward then RC start.
+/// Returns `None` if assembly fails.
 fn assemble_chain_sequence(chain: &[u128], segs: &HashMap<u128, Segment>, k: usize) -> Option<String> {
     if chain.is_empty() { return None; }
     let mut seq = segs[&chain[0]].seq.clone();
@@ -145,6 +195,8 @@ fn assemble_chain_sequence(chain: &[u128], segs: &HashMap<u128, Segment>, k: usi
     }
     Some(seq)
 }
+
+/// Enumerate orientation-safe path sequences over compacted edges, up to `max_paths`.
 fn enumerate_paths_and_sequences(
     start: u128,
     end: u128,
@@ -197,12 +249,13 @@ fn enumerate_paths_and_sequences(
     out_seqs
 }
 
-// BubbleGun shape
+/// BubbleGun container types used for flexible input parsing.
 #[derive(Deserialize)]
 struct BubbleChain { bubbles: Vec<Bubble> }
 #[derive(Deserialize)]
 struct Bubble { id: usize, ends: Vec<String>, inside: Vec<String> }
 
+/// Recursively collect bubbles from any JSON shape (object/array of chains or bubbles).
 fn collect_bubbles_any(v: &Value) -> Vec<Bubble> {
     let mut out = Vec::new();
     match v {
@@ -233,6 +286,7 @@ fn collect_bubbles_any(v: &Value) -> Vec<Bubble> {
 
 // ====== High-k graph index (k-mer→nodes + adjacency) ======
 
+/// Convert ASCII DNA base to 2-bit code (A/C/G/T → 0/1/2/3).
 fn base2(x: u8) -> Option<u8> {
     match x {
         b'A' => Some(0),
@@ -242,6 +296,8 @@ fn base2(x: u8) -> Option<u8> {
         _ => None,
     }
 }
+
+/// Pack a k-mer string into a `u128` (2 bits per base). Returns `None` if non-ACGT.
 fn pack_kmer_u128(s: &str) -> Option<u128> {
     let mut v: u128 = 0;
     for &b in s.as_bytes() {
@@ -250,6 +306,8 @@ fn pack_kmer_u128(s: &str) -> Option<u128> {
     }
     Some(v)
 }
+
+/// Roll a packed k-mer forward by one base (left shift + add), masking to `2k` bits.
 fn roll_fwd(prev: u128, out_b: u8, k: usize) -> Option<u128> {
     let d = base2(out_b)?;
     let mask = if k == 64 { u128::MAX } else { (1u128 << (2*k)) - 1 };
@@ -257,11 +315,15 @@ fn roll_fwd(prev: u128, out_b: u8, k: usize) -> Option<u128> {
     Some(v)
 }
 
+/// High-k index: exact *k* (from high-k DBG), map from k-mer code to node ids, and adjacency.
 struct HighIndex {
     k: usize,
     kmer2nodes: HashMap<u128, Vec<u128>>,
     succ: HashMap<u128, Vec<u128>>,
 }
+
+/// Build the high-k index from a GFA. Only `S` lines with sequence length == *k*
+/// are indexed (classical DBG k-mers). Returns [`HighIndex`].
 fn build_high_index(gfa: &str) -> HighIndex {
     let f = File::open(gfa).expect("open high-k GFA");
     let rdr = BufReader::new(f);
@@ -297,7 +359,8 @@ fn build_high_index(gfa: &str) -> HighIndex {
     HighIndex { k: k.expect("empty high-k graph"), kmer2nodes, succ }
 }
 
-// Walk candidate sequence through high-k graph (both strands); count solutions
+/// Count the number of valid walks for `seq` through the high-k graph (both strands),
+/// bounding the BFS frontier size by `max_frontier`.
 fn count_walks(seq: &str, hi: &HighIndex, max_frontier: usize) -> usize {
     if seq.len() < hi.k { return 0; }
     let mut total = 0usize;
@@ -341,6 +404,8 @@ fn count_walks(seq: &str, hi: &HighIndex, max_frontier: usize) -> usize {
 
 // ====== Main glue ======
 
+/// Parse CLI, enumerate low-k candidates, build high-k index, map-walk candidates,
+/// and write JSONL labels (`bubble_id`, `label_path`, `label_reason`, `winner_occurrences`).
 fn main() {
     // Usage:
     // cargo run --release --bin project_highk_mapwalk -- \

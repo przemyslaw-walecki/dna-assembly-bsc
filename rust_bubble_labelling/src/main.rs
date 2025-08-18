@@ -1,32 +1,51 @@
-// main.rs
-//
-// Hyperbubble labeling pipeline — GNN-ready, ID-free output (parallel + progress).
-// - Compact bubbles to superedges (unitigs) with coverage aggregates.
-// - Split unitigs at bubble endpoints.
-// - Enumerate paths bidirectionally with orientation-safe sequence assembly.
-// - Primary labeler: reference-anchored walk between endpoint k-mers (both strands).
-//   * Falls back to Minimal Unique Extension (MUE) on reference when endpoints are repetitive.
-// - Fallback labeler: adaptive flank extension + exact KMP on both strands.
-// - **IDs are removed** from the output. Upstream/downstream and endpoints are sequences.
-// - cov_min / cov_mean prefer EC:i per link; fallback to min(KC:u, KC:v).
-// - Parallelized over bubbles using Rayon (batched to keep memory bounded).
-// - Shows a global progress bar (processed / total / ETA) using `indicatif`.
-//
-// Usage (positional args):
-//   cargo run --release -- <graph.gfa> <bubbles.json/jsonl> <reference.fasta> <out.jsonl>
-//
-// JSONL per bubble includes:
-//   {
-//     bubble_id, k,
-//     start_seq, end_seq,
-//     upstream: [seq,...], downstream: [seq,...],
-//     upstream_nodes: [{seq,cov},...], downstream_nodes: [{seq,cov},...],
-//     nodes: [{seq,cov},...],
-//     edges: [{source_seq,target_seq,len_nodes,len_bp,cov_min,cov_mean}, ...],
-//     paths: [[edge_idx,...], ...],
-//     label_path: <usize|null>,
-//     label_reason: <string|null>        // "unique_ref_walk", "adaptive_kmp", "ambiguous_ref_multi_hit", "no_ref_match"
-//   }
+//! # Hyperbubble Labeling Pipeline (De Bruijn, GNN-ready, ID-free)
+//!
+//! This executable takes a compacted De Bruijn graph (GFA), a set of hyperbubbles,
+//! and a reference genome (FASTA), then emits **one JSONL record per bubble**
+//! with **sequence-only features** suitable for GNN training. Node/edge IDs are
+//! removed — sequences are used instead.
+//!
+//! ## Highlights
+//! - Compacts simple chains into **superedges (unitigs)** and aggregates coverage.
+//! - **Splits** unitigs at bubble endpoints to preserve boundary semantics.
+//! - Enumerates **all paths** between endpoints (bounded), assembling sequences
+//!   in an **orientation-safe** manner (both strands).
+//! - **Primary labeler:** reference-anchored walk between endpoint *k*-mers (both strands).
+//!   - Fallback to **Minimal Unique Extension (MUE)** on the reference when endpoints are repetitive.
+//! - **Fallback labeler:** adaptive flank extension + exact **KMP** search on both strands.
+//! - **ID-free output:** upstream/downstream and endpoints are sequences.
+//! - Coverage: `cov_min` / `cov_mean` prefer **EC:i** per link; fallback to `min(KC:u, KC:v)`.
+//! - **Parallelized** with Rayon (batched to bound memory); global progress via `indicatif`.
+//!
+//! ## Usage
+//! ```text
+//! cargo run --release -- <graph.gfa> <bubbles.json|jsonl> <reference.fasta> <out.jsonl>
+//! ```
+//!
+//! ## Output (JSONL per bubble)
+//! Each line is a `BubbleRecord`:
+//! ```json
+//! {
+//!   "bubble_id": 123,
+//!   "k": 31,
+//!   "start_seq": "ATGC...",
+//!   "end_seq":   "TGCA...",
+//!   "upstream": ["..."], "downstream": ["..."],
+//!   "upstream_nodes": [{"seq":"...","cov":42}], "downstream_nodes": [{"seq":"...","cov":17}],
+//!   "nodes": [{"seq":"...","cov":...}],
+//!   "edges": [
+//!     {"source_seq":"...","target_seq":"...","len_nodes":7,"len_bp":37,"cov_min":10,"cov_mean":12.5}
+//!   ],
+//!   "paths": [[0,2,5], [1,4]],
+//!   "label_path": 0,
+//!   "label_reason": "unique_ref_walk" // or "adaptive_kmp", "ambiguous_ref_multi_hit", "no_ref_match"
+//! }
+//! ```
+//!
+//! ## Notes
+//! - `k` is inferred from the first segment’s sequence length in the GFA.
+//! - JSON input supports `BubbleChain` collections or raw `Bubble` arrays (JSON or JSONL).
+//! - Batching keeps memory usage stable during parallel processing.
 
 use indicatif::{ProgressBar, ProgressStyle};
 use rayon::prelude::*;
@@ -38,8 +57,11 @@ use std::env;
 use std::fs::File;
 use std::io::{BufRead, BufReader, BufWriter, Write};
 
-// ---------- Data models ----------
-
+/// Segment (GFA `S` record).
+///
+/// - `id`: numeric segment identifier (required to be numeric in this tool).
+/// - `seq`: segment sequence (uppercase A/C/G/T/N).
+/// - `cov`: node coverage (from `KC:i` if present; otherwise 0).
 #[derive(Debug)]
 struct Segment {
     id: u128,
@@ -47,6 +69,10 @@ struct Segment {
     cov: usize, // KC
 }
 
+/// Link (GFA `L` record).
+///
+/// - `from` → `to`: numeric segment ids.
+/// - `cov`: edge/link coverage (from `EC:i` if present; otherwise 0).
 #[derive(Debug, Clone)]
 struct Link {
     from: u128,
@@ -54,11 +80,17 @@ struct Link {
     cov: usize, // EC
 }
 
+/// Container for a chain of bubbles (input JSON helper).
 #[derive(Deserialize)]
 struct BubbleChain {
     bubbles: Vec<Bubble>,
 }
 
+/// A single hyperbubble definition.
+///
+/// - `id`: stable bubble identifier from upstream discovery.
+/// - `ends`: two endpoint node identifiers as strings (numeric content expected).
+/// - `inside`: node identifiers (strings) forming the internal bubble subgraph.
 #[derive(Deserialize)]
 struct Bubble {
     id: usize,
@@ -66,6 +98,10 @@ struct Bubble {
     inside: Vec<String>, // node ids
 }
 
+/// A compacted path (“superedge”/unitig) across nodes with coverage aggregates.
+///
+/// `chain` includes endpoints `from` and `to`. The `chain` is **not serialized**;
+/// downstream JSON only exposes endpoint sequences.
 #[derive(Clone, Debug)]
 struct SuperEdge {
     from: u128,
@@ -75,54 +111,72 @@ struct SuperEdge {
     cov_mean: f64,
 }
 
-// ---------- Output schema (ID-free) ----------
-
+/// JSONL record: ID-free bubble features suitable for GNN ingestion.
 #[derive(Serialize)]
 struct BubbleRecord {
+    /// Bubble identifier (from input).
     bubble_id: usize,
+    /// *k*-mer size inferred from GFA segment sequence length.
     k: usize,
 
+    /// Endpoint sequences.
     start_seq: String,
     end_seq: String,
 
+    /// Greedily selected upstream/downstream neighbor sequences (preset count).
     upstream: Vec<String>,
     downstream: Vec<String>,
 
+    /// Upstream/downstream neighbor nodes with coverage.
     upstream_nodes: Vec<NodeFeature>,
     downstream_nodes: Vec<NodeFeature>,
 
+    /// All supernodes’ sequences (context) with coverage.
     nodes: Vec<NodeFeature>,
 
+    /// Superedges serialized by endpoint sequences and coverage aggregates.
     edges: Vec<EdgeFeature>,
 
+    /// Candidate paths as lists of edge indices into `edges`.
     paths: Vec<Vec<usize>>,
+    /// Chosen label path index (if any).
     label_path: Option<usize>,
+    /// Labeling rationale.
+    /// One of: `"unique_ref_walk"`, `"adaptive_kmp"`, `"ambiguous_ref_multi_hit"`, `"no_ref_match"`.
     label_reason: Option<String>,
 }
 
+/// Node-level feature (sequence + coverage).
 #[derive(Serialize)]
 struct NodeFeature {
     seq: String,
     cov: usize,
 }
 
+/// Edge-level feature between two endpoint sequences with coverage aggregates.
 #[derive(Serialize)]
 struct EdgeFeature {
     source_seq: String,
     target_seq: String,
+    /// Number of nodes in this superedge path (`chain.len()`).
     len_nodes: usize,
+    /// Total base pairs spanned assuming overlapping *k* (`k + len_nodes - 1`, saturating at `k`).
     len_bp: usize,
+    /// Minimum edge coverage across the chain (prefers `EC:i`, else `min(KC)`).
     cov_min: usize,
+    /// Mean edge coverage across the chain.
     cov_mean: f64,
 }
 
-// ---------- Utilities ----------
-
+/// Parse a string into `u128` with a clear panic on failure.
+///
+/// Used to normalize string node ids from JSON into numeric form.
 fn parse_u128(s: &str) -> u128 {
     s.parse::<u128>()
         .unwrap_or_else(|_| panic!("Expected numeric node id, got: {s}"))
 }
 
+/// Reverse-complement of a DNA string (A↔T, C↔G; others→N).
 fn revcomp(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.bytes().rev() {
@@ -137,8 +191,16 @@ fn revcomp(s: &str) -> String {
     out
 }
 
-// ---------- GFA parsing ----------
-
+/// Parse a GFA file to collect segments, links, and a map of edge coverages.
+///
+/// Coverage preference:
+/// - Edge coverage `EC:i` (per `L` record) if present.
+/// - Otherwise fall back to `min(KC:u, KC:v)` when aggregating.
+///
+/// Returns:
+/// 1) map of `id → Segment`
+/// 2) list of `Link`
+/// 3) map of `(from, to) → EC`
 fn parse_gfa(
     path: &str,
 ) -> (HashMap<u128, Segment>, Vec<Link>, HashMap<(u128, u128), usize>) {
@@ -192,6 +254,7 @@ fn parse_gfa(
     (segs, links, edge_cov)
 }
 
+/// Build adjacency lists for successors and predecessors from segments and links.
 fn build_adj(
     segs: &HashMap<u128, Segment>,
     links: &[Link],
@@ -205,11 +268,17 @@ fn build_adj(
     (succ, pred)
 }
 
-// ---------- Compaction (coverage aggregation + KC fallback) ----------
-
+/// Compact simple chains into `SuperEdge`s and compute coverage aggregates.
+///
+/// Compaction respects an induced node set `nodes`. Coverage preference is
+/// `EC:i` when available; otherwise `min(KC:u, KC:v)` is used.
+///
+/// Returns:
+/// - vector of `SuperEdge`s,
+/// - list of “supernodes” (nodes with `in≠1` or `out≠1`) forming endpoints.
 fn compact_with_chains(
     nodes: &HashSet<u128>,
-//
+    //
     succ: &HashMap<u128, Vec<u128>>,
     pred: &HashMap<u128, Vec<u128>>,
     edge_cov: &HashMap<(u128, u128), usize>,
@@ -287,12 +356,15 @@ fn compact_with_chains(
     (out, supernodes)
 }
 
-// ---------- Splitting at endpoints ----------
-
+/// Return the position of a node in a chain (if present).
 fn index_in_chain(chain: &[u128], node: u128) -> Option<usize> {
     chain.iter().position(|&x| x == node)
 }
 
+/// Split superedges at a given node, preserving coverage aggregates.
+///
+/// If the split node is interior, two new edges are emitted. Edges that only
+/// touch at endpoints are passed through unchanged.
 fn split_edges_at(node: u128, edges: &[SuperEdge]) -> Vec<SuperEdge> {
     let mut out = Vec::with_capacity(edges.len() + 2);
     for e in edges {
@@ -324,6 +396,7 @@ fn split_edges_at(node: u128, edges: &[SuperEdge]) -> Vec<SuperEdge> {
     out
 }
 
+/// Build an index from `from` node → list of edge indices.
 fn from_index(edges: &[SuperEdge]) -> HashMap<u128, Vec<usize>> {
     let mut m: HashMap<u128, Vec<usize>> = HashMap::new();
     for (i, e) in edges.iter().enumerate() {
@@ -332,8 +405,9 @@ fn from_index(edges: &[SuperEdge]) -> HashMap<u128, Vec<usize>> {
     m
 }
 
-// ---------- Orientation-safe assembly ----------
-
+/// Append the *k*-mer from `next_seq` to `assembled` if it overlaps by `k-1`.
+///
+/// Attempts forward first; if mismatch, tries reverse-complement of `next_seq`.
 fn append_next_kmer(assembled: &mut String, next_seq: &str, k: usize) -> bool {
     if assembled.as_bytes()[(assembled.len() - (k - 1))..] == next_seq.as_bytes()[..(k - 1)] {
         assembled.push(next_seq.as_bytes()[k - 1] as char);
@@ -349,6 +423,9 @@ fn append_next_kmer(assembled: &mut String, next_seq: &str, k: usize) -> bool {
     }
 }
 
+/// Assemble a sequence for a chain of nodes (orientation-safe).
+///
+/// Tries starting from the first node as-is; if inconsistent, retries with its RC.
 fn assemble_chain_sequence(
     chain: &[u128],
     segments: &HashMap<u128, Segment>,
@@ -372,6 +449,7 @@ fn assemble_chain_sequence(
     Some(seq2)
 }
 
+/// Append a chain’s sequence to an already assembled string (orientation-safe).
 fn append_chain_to_sequence(
     assembled: &mut String,
     chain: &[u128],
@@ -385,8 +463,13 @@ fn append_chain_to_sequence(
     true
 }
 
-// ---------- Path enumeration (bidirectional) ----------
-
+/// Enumerate paths from `start` to `end` (and reverse if forward is empty),
+/// assembling orientation-safe path sequences.
+///
+/// Returns `(paths, sequences, reversed)` where:
+/// - `paths` are edge-index lists,
+/// - `sequences` are assembled strings per path,
+/// - `reversed` indicates whether reverse enumeration was used.
 fn enumerate_paths_bidir(
     start: u128,
     end: u128,
@@ -452,8 +535,7 @@ fn enumerate_paths_bidir(
     (p_rev, s_rev, true)
 }
 
-// ---------- Global degrees + unique flanks (for labeling only) ----------
-
+/// Compute global in/out-degrees for the whole graph (used in labeling).
 fn compute_global_deg(
     succ: &HashMap<u128, Vec<u128>>,
     _pred: &HashMap<u128, Vec<u128>>,
@@ -472,6 +554,8 @@ fn compute_global_deg(
     (indeg, outdeg)
 }
 
+/// Gather a unique-degree chain from a seed by repeatedly following the sole
+/// successor (or predecessor), capped by `nodes_cap`.
 fn gather_unique_chain(
     seed: u128,
     forward: bool, // true successors (right), false predecessors (left)
@@ -500,6 +584,8 @@ fn gather_unique_chain(
     chain
 }
 
+/// Assemble sequence for an ordered list of node ids. Returns assembled string
+/// and extra bp beyond the first *k* (or zero on failure).
 fn sequence_for_nodes(
     nodes: &[u128],
     segments: &HashMap<u128, Segment>,
@@ -524,6 +610,10 @@ fn sequence_for_nodes(
     Some((seq, extra))
 }
 
+/// Compute left/right flanking sequences by walking unique-degree chains from
+/// the endpoints up to `max_bp` (converted to node count by `k`).
+///
+/// Returns `(left_bp, right_bp)` excluding the overlapping *k*.
 fn compute_flanks(
     start: u128,
     end: u128,
@@ -552,8 +642,7 @@ fn compute_flanks(
     (left_bp.to_string(), right_bp.to_string())
 }
 
-// ---------- KMP exact substring search ----------
-
+/// Build KMP prefix function (LPS array) for a pattern.
 fn kmp_build(pat: &str) -> Vec<usize> {
     let m = pat.len();
     let pb = pat.as_bytes();
@@ -575,6 +664,7 @@ fn kmp_build(pat: &str) -> Vec<usize> {
     lps
 }
 
+/// Find all occurrences of `pat` in `text` using KMP. Returns start indices.
 fn kmp_search_all(pat: &str, text: &str) -> Vec<usize> {
     if pat.is_empty() { return vec![]; }
     let lps = kmp_build(pat);
@@ -599,8 +689,7 @@ fn kmp_search_all(pat: &str, text: &str) -> Vec<usize> {
     res
 }
 
-// ---------- Reference text (both strands) ----------
-
+/// A reference chromosome with both forward and reverse-complement sequences.
 #[derive(Clone)]
 struct Chrom {
     name: String,
@@ -608,11 +697,13 @@ struct Chrom {
     rc_seq: String,
 }
 
+/// Reference text container for all chromosomes (both strands).
 struct RefText {
     chroms: Vec<Chrom>,
 }
 
 impl RefText {
+    /// Load a FASTA file into `RefText`, computing reverse-complements.
     fn load_fasta(path: &str) -> Self {
         let f = File::open(path).expect("open FASTA");
         let rdr = BufReader::new(f);
@@ -641,11 +732,11 @@ impl RefText {
     }
 }
 
-// ---------- Reference-anchored helpers ----------
-
+/// Reference position of a *k*-mer.
 #[derive(Clone, Copy, Debug)]
 struct Pos { chrom: usize, pos: usize, rev: bool } // rev=false => forward strand
 
+/// Find all occurrences of a *k*-mer on both strands of the reference.
 fn all_kmer_pos(reftext: &RefText, kmer: &str) -> Vec<Pos> {
     fn scan(hay: &str, needle: &str, chrom: usize, rev: bool, out: &mut Vec<Pos>) {
         if needle.is_empty() || hay.len() < needle.len() { return; }
@@ -667,6 +758,8 @@ fn all_kmer_pos(reftext: &RefText, kmer: &str) -> Vec<Pos> {
     out
 }
 
+/// Extract the reference substring between two *k*-mer positions on the same
+/// chromosome and strand, inclusive of both end *k*-mers.
 fn ref_substr_between(reftext: &RefText, a: Pos, b: Pos, k: usize) -> Option<String> {
     if a.chrom != b.chrom || a.rev != b.rev { return None; }
     let c = &reftext.chroms[a.chrom];
@@ -684,6 +777,11 @@ fn ref_substr_between(reftext: &RefText, a: Pos, b: Pos, k: usize) -> Option<Str
     None
 }
 
+/// Minimal Unique Extension (MUE) of a base *k*-mer on the reference.
+///
+/// Iteratively extends to the right (`extend_right=true`) or left (`false`)
+/// until a unique occurrence is found or `max_ext` is reached. Returns the
+/// extension length and the unique position if successful.
 fn minimal_unique_extension(
     reftext: &RefText,
     base_kmer: &str,
@@ -729,6 +827,13 @@ fn minimal_unique_extension(
     None
 }
 
+/// Primary labeler: compare candidate path sequences against the exact
+/// reference substring between endpoint *k*-mers (both strands).
+///
+/// If endpoints are repetitive, optionally applies MUE to disambiguate.
+///
+/// Returns `(Some(index), "unique_ref_walk")` on a unique match; otherwise
+/// `(None, reason)` where `reason` is `"no_ref_match"` or `"ambiguous_ref_multi_hit"`.
 fn label_with_ref_walk(
     candidate_seqs: &[String],
     start_seq: &str,
@@ -782,8 +887,10 @@ fn label_with_ref_walk(
     }
 }
 
-// ---------- Labeling with adaptive flanks & KMP (fallback) ----------
-
+/// Fallback labeler: adaptively extend flanks and search with exact KMP on
+/// both strands. Chooses the unique path that yields exactly one global hit.
+///
+/// Returns `(Some(index), used_flank_bp)` on success; otherwise `(None, max_flank_bp*2)`.
 fn label_with_adaptive_flanks(
     candidate_seqs: &[String], // per path (already orientation-safe within bubble)
     start: u128,
@@ -842,8 +949,9 @@ fn label_with_adaptive_flanks(
     (None, max_flank_bp * 2)
 }
 
-// ---------- Preset greedy flanks (export only) ----------
-
+/// Choose the “best” neighbor by (EC desc, KC desc, id asc) for determinism.
+///
+/// Direction controlled by `forward`: `true` uses successors, `false` predecessors.
 fn best_neighbor(
     cur: u128,
     forward: bool,
@@ -882,6 +990,8 @@ fn best_neighbor(
     best_id
 }
 
+/// Collect exactly `n` neighbors greedily from `seed` in the given direction,
+/// avoiding tiny cycles. Used for exporting preset flanks.
 fn collect_flanks_greedy(
     seed: u128,
     forward: bool,
@@ -908,8 +1018,10 @@ fn collect_flanks_greedy(
     out
 }
 
-// ---------- Context helpers for JSON ----------
-
+/// Collect an induced node set for a bubble context by expanding:
+/// - upstream from `start` by `radius`,
+/// - downstream from `end` by `radius`,
+/// and uniting with the bubble’s internal nodes.
 fn collect_nodes_for_bubble_context(
     inside: &HashSet<u128>,
     start: u128,
@@ -958,8 +1070,8 @@ fn collect_nodes_for_bubble_context(
     nodes
 }
 
-// ---------- Progress helpers ----------
-
+/// Count total bubbles in a JSON/JSONL file without loading everything into memory.
+/// Supports `BubbleChain` objects, arrays of `BubbleChain`, or arrays of `Bubble`.
 fn count_bubbles_file(path: &str) -> usize {
     let in_file = File::open(path).expect("open bubbles json/jsonl");
     let reader = BufReader::new(in_file);
@@ -987,8 +1099,15 @@ fn count_bubbles_file(path: &str) -> usize {
     total
 }
 
-// ---------- Per-bubble worker (returns one JSON line) ----------
-
+/// Build a single JSON line (`BubbleRecord`) for a bubble by:
+/// 1) building an induced context, compacting to superedges,
+/// 2) splitting at endpoints,
+/// 3) enumerating candidate paths with orientation-safe assembly,
+/// 4) labeling via reference walk (MUE optional), then fallback adaptive flanks + KMP,
+/// 5) exporting preset greedy flanks (sequence lists and node features),
+/// 6) serializing **ID-free** features.
+///
+/// Returns `None` if bubble endpoints are malformed.
 fn build_record_json(
     bubble: &Bubble,
     k: usize,
@@ -1114,8 +1233,12 @@ fn build_record_json(
     Some(serde_json::to_string(&rec).unwrap())
 }
 
-// ---------- Main (parallel, batched writer, with progress) ----------
-
+/// Program entry point.
+///
+/// - Loads GFA graph and reference FASTA.
+/// - Streams bubbles from JSON/JSONL (various shapes supported).
+/// - Processes in **parallel batches** with progress bar.
+/// - Writes one JSON line per bubble to `<out.jsonl>`.
 fn main() {
     let args: Vec<String> = env::args().collect();
     if args.len() != 5 {

@@ -1,3 +1,29 @@
+//! # High-k Unitig Scan Labeling (Aho–Corasick over Unitigs)
+//!
+//! This tool labels BubbleGun bubbles by scanning **high-k** unitig sequences
+//! for exact matches to **low-k** candidate path sequences (both strands) using
+//! Aho–Corasick.
+//!
+//! ## Pipeline
+//! 1) Read low-k GFA, enumerate orientation-safe candidate sequences per bubble.
+//! 2) Read high-k GFA and compact it to unitigs (chains between non-1/1-degree nodes).
+//! 3) Build an AC automaton over all candidates (forward+RC), scan all unitigs.
+//! 4) Label bubbles with a single winning candidate.
+//!
+//! ## Winner rule
+//! - Default: winner unique and `hits == 1` (`--require-unique-occurrence`).
+//! - `--allow-multi-occurrence`: winner unique with `hits ≥ 1`.
+//!
+//! ## Usage
+//! ```text
+//! cargo run --release --bin project_highk_unitigs -- \
+//!   --low-gfa ecoli_21_graph.gfa \
+//!   --bubbles ecoli_unlabeled_bubblegun.json \
+//!   --high-gfa ecoli_41_graph.gfa \
+//!   --out labels_from_k41.jsonl \
+//!   [--allow-multi-occurrence]
+//! ```
+
 use aho_corasick::{AhoCorasick, AhoCorasickBuilder};
 use serde::Deserialize;
 use serde_json::Value;
@@ -8,10 +34,12 @@ use std::io::{BufRead, BufReader, Write};
 
 // -------------------- shared / util --------------------
 
+/// Parse a decimal string into `u128`, panicking on non-numeric input.
 fn parse_u128(s: &str) -> u128 {
     s.parse::<u128>().unwrap_or_else(|_| panic!("Non-numeric id: {s}"))
 }
 
+/// Reverse-complement a DNA string (A↔T, C↔G; others→N).
 fn revcomp(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.bytes().rev() {
@@ -26,6 +54,8 @@ fn revcomp(s: &str) -> String {
     out
 }
 
+/// Append the next *k*-mer `next_seq` to `assembled` if it overlaps by `k-1` bp.
+/// Falls back to RC of `next_seq` if needed.
 fn append_next_kmer(assembled: &mut String, next_seq: &str, k: usize) -> bool {
     if assembled.as_bytes()[(assembled.len() - (k - 1))..] == next_seq.as_bytes()[..(k - 1)] {
         assembled.push(next_seq.as_bytes()[k - 1] as char);
@@ -43,12 +73,14 @@ fn append_next_kmer(assembled: &mut String, next_seq: &str, k: usize) -> bool {
 
 // -------------------- low-k graph + bubblegun --------------------
 
+/// Segment from GFA `S` line.
 #[derive(Debug)]
 struct Segment {
     id: u128,
     seq: String,
 }
 
+/// Parse GFA into segments and both successor/predecessor adjacency maps.
 fn parse_gfa(path: &str) -> (HashMap<u128, Segment>, HashMap<u128, Vec<u128>>, HashMap<u128, Vec<u128>>) {
     let f = File::open(path).expect("open GFA");
     let rdr = BufReader::new(f);
@@ -83,11 +115,13 @@ fn parse_gfa(path: &str) -> (HashMap<u128, Segment>, HashMap<u128, Vec<u128>>, H
     (segs, succ, pred)
 }
 
+/// Bubble shapes used for BubbleGun input.
 #[derive(Deserialize, Debug)]
 struct Bubble { id: usize, ends: Vec<String>, inside: Vec<String> }
 #[derive(Deserialize, Debug)]
 struct BubbleChain { bubbles: Vec<Bubble> }
 
+/// Load bubbles from a BubbleGun JSON file in flexible shapes.
 fn collect_bubbles_from_bubblegun(path: &str) -> Vec<Bubble> {
     let f = File::open(path).expect("open BubbleGun JSON");
     let val: Value = serde_json::from_reader(BufReader::new(f)).expect("parse BubbleGun JSON");
@@ -134,7 +168,8 @@ fn collect_bubbles_from_bubblegun(path: &str) -> Vec<Bubble> {
     out
 }
 
-// DFS enumerate orientation-safe path sequences inside bubble induced subgraph.
+/// DFS enumerate orientation-safe path sequences inside the bubble’s induced subgraph.
+/// Tries `start→end`, else tries reverse direction and RCs the outputs back to start→end.
 fn enumerate_paths_sequences(
     start: u128,
     end: u128,
@@ -214,6 +249,8 @@ fn enumerate_paths_sequences(
 
 // -------------------- high-k compaction to unitigs --------------------
 
+/// Compact the high-k graph to unitigs (chains between non-1/1-degree nodes)
+/// and return the assembled unitig sequences (orientation-safe).
 fn compact_highk_unitigs(
     segs: &HashMap<u128, Segment>,
     succ: &HashMap<u128, Vec<u128>>,
@@ -285,6 +322,8 @@ fn compact_highk_unitigs(
 
 // -------------------- main --------------------
 
+/// Parse CLI, build low-k candidates, compact high-k to unitigs, AC-scan unitigs,
+/// and write JSONL labels (`bubble_id`, `label_path`, `label_reason`).
 fn main() {
     // Usage:
     // cargo run --release --bin project_highk_unitigs -- \

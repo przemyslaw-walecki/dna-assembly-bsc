@@ -1,3 +1,27 @@
+//! # High-k Validation from BubbleGun Candidates (Aho–Corasick)
+//!
+//! This tool reads a **low-k** de Bruijn graph (GFA), a BubbleGun bubbles file,
+//! and a **high-k** de Bruijn graph (GFA). For each bubble, it:
+//! 1) enumerates orientation-safe candidate path sequences within the **low-k** graph,
+//! 2) builds an Aho–Corasick automaton over all candidate sequences (both strands),
+//! 3) streams the **high-k** GFA `S` lines and counts matches per candidate,
+//! 4) emits JSONL labels for bubbles where there is a single winning candidate.
+//!
+//! ## Winner rule
+//! - A bubble is labeled when **exactly one** candidate path has hits in the high-k GFA.
+//! - By default the winner must also have **hits == 1**; this can be relaxed by
+//!   `--allow-multi-occurrence`.
+//!
+//! ## Usage
+//! ```text
+//! cargo run --release --bin project_highk_gfa -- \
+//!   --low-gfa k21.gfa \
+//!   --bubbles k21_unlabeled_bubblegun.json \
+//!   --high-gfa k41.gfa \
+//!   --out labels_from_k41.jsonl \
+//!   [--allow-multi-occurrence]
+//! ```
+
 use aho_corasick::{AhoCorasick, AhoCorasickBuilder};
 use serde::{Deserialize};
 use serde_json::Value;
@@ -8,16 +32,21 @@ use std::env;
 
 // -------------------- low-k graph --------------------
 
+/// GFA segment (`S` line).
 #[derive(Debug)]
 struct Segment {
     id: u128,
     seq: String,
 }
 
+/// Parse a decimal string into `u128`, panicking on non-numeric input.
 fn parse_u128(s: &str) -> u128 {
     s.parse::<u128>().unwrap_or_else(|_| panic!("Non-numeric id: {s}"))
 }
 
+/// Parse a (low-k) GFA file and return:
+/// - map of segment id → [`Segment`],
+/// - successor adjacency list (id → Vec<id>).
 fn parse_gfa(path: &str) -> (HashMap<u128, Segment>, HashMap<u128, Vec<u128>>) {
     let f = File::open(path).expect("open GFA");
     let rdr = BufReader::new(f);
@@ -50,19 +79,25 @@ fn parse_gfa(path: &str) -> (HashMap<u128, Segment>, HashMap<u128, Vec<u128>>) {
 
 // -------------------- BubbleGun parsing --------------------
 
+/// A single BubbleGun bubble entry.
 #[derive(Deserialize, Debug)]
 struct Bubble {
+    /// Bubble identifier.
     id: usize,
+    /// Endpoint node ids (as strings): `[start, end]`.
     ends: Vec<String>,     // [start,end]
+    /// Node ids (as strings) inside the bubble.
     inside: Vec<String>,
 }
 
+/// A BubbleGun chain (wrapper format).
 #[derive(Deserialize, Debug)]
 struct BubbleChain {
     bubbles: Vec<Bubble>,
 }
 
-// Accepts a BubbleGun JSON in any of the common shapes and yields bubbles.
+/// Load a BubbleGun JSON file in common shapes (single chain, array of chains,
+/// flat array of bubbles) and return a flat list of [`Bubble`].
 fn collect_bubbles_from_bubblegun(path: &str) -> Vec<Bubble> {
     let f = File::open(path).expect("open BubbleGun JSON");
     let rdr = BufReader::new(f);
@@ -119,6 +154,7 @@ fn collect_bubbles_from_bubblegun(path: &str) -> Vec<Bubble> {
 
 // -------------------- orientation-safe assembly --------------------
 
+/// Reverse-complement a DNA string (A↔T, C↔G; others→N).
 fn revcomp(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.bytes().rev() {
@@ -133,6 +169,8 @@ fn revcomp(s: &str) -> String {
     out
 }
 
+/// Append the next *k*-mer `next_seq` to `assembled` if it overlaps by `k-1` bp.
+/// If forward fails, tries the reverse-complement of `next_seq`.
 fn append_next_kmer(assembled: &mut String, next_seq: &str, k: usize) -> bool {
     if assembled.as_bytes()[(assembled.len() - (k - 1))..] == next_seq.as_bytes()[..(k - 1)] {
         assembled.push(next_seq.as_bytes()[k - 1] as char);
@@ -148,7 +186,11 @@ fn append_next_kmer(assembled: &mut String, next_seq: &str, k: usize) -> bool {
     }
 }
 
-// Enumerate path sequences within the induced subgraph of {inside ∪ ends}.
+/// Enumerate orientation-safe path sequences inside an induced subgraph
+/// consisting of `inside ∪ ends`. Tries `start→end`; if empty, tries
+/// `end→start` and reverse-complements the outputs.
+///
+/// Returns at most `max_paths` sequences; DFS is bounded by `guard_steps`.
 fn enumerate_paths_sequences(
     start: u128,
     end: u128,
@@ -249,6 +291,8 @@ fn enumerate_paths_sequences(
 
 // -------------------- high-k scan --------------------
 
+/// Stream `S` lines of a high-k GFA and count Aho–Corasick matches per
+/// **base pattern** (where base index = forward/RC pair index).
 fn stream_gfa_and_count_matches(
     gfa_path: &str,
     ac: &AhoCorasick,
@@ -274,9 +318,11 @@ fn stream_gfa_and_count_matches(
 
 // -------------------- main --------------------
 
+/// Entry point. Parses CLI, enumerates low-k candidates, scans the high-k GFA
+/// with Aho–Corasick, and writes JSONL labels (`bubble_id`, `label_path`, `label_reason`).
 fn main() {
     // Usage:
-    // cargo run --release --bin project_highk_from_bubblegun -- \
+    // cargo run --release --bin project_highk_gfa -- \
     //   --low-gfa k21.gfa \
     //   --bubbles k21_unlabeled_bubblegun.json \
     //   --high-gfa k41.gfa \
