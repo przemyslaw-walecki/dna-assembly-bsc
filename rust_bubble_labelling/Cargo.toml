@@ -1,0 +1,13 @@
+[package]
+name = "rust_basic_dna_assembler"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }   # for CLI parsing
+fxhash = "0.2"                                    # faster hash maps
+rayon = "1.10"                                     # parallelism
+indicatif = "0.17"                                # progress bars
+serde       = { version = "1.0", features = ["derive"] }
+serde_json  = "1.0"
+aho-corasick = "1"
