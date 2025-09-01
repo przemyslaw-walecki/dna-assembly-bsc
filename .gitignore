@@ -9,3 +9,5 @@ site/
 docs/static
 *.fq
 *.gfa
+*.json
+*.jsonl
