@@ -1,4 +1,4 @@
  #!/bin/sh
 
- ./target/release/rust_basic_dna_assembler.exe -1 ../random_genome_generator/reads50_hc_20_30_1.fq -2 ../random_genome_generator/reads50_hc_20_30_1.fq -k 12 -t 0 -d 0 -o short_random_rust.fa
+ ./target/release/rust_basic_dna_assembler -1 ../genomes/salmonella_clean_100_300_1.fq -2 ../genomes/salmonella_clean_100_300_2.fq -k 21 -t 0 -d 0 -o salmonella_graph_k21.gfa
  
