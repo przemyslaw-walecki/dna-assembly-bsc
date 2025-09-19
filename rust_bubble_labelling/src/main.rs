@@ -12,7 +12,13 @@
 //!   in an **orientation-safe** manner (both strands).
 //! - **Primary labeler:** reference-anchored walk between endpoint *k*-mers (both strands).
 //!   - Fallback to **Minimal Unique Extension (MUE)** on the reference when endpoints are repetitive.
-//! - **Fallback labeler:** adaptive flank extension + exact **KMP** search on both strands.
+//! - **Fallback labeler (lenient, multi-locus, 100% safe):**
+//!   - Adaptive flank extension + **Aho–Corasick** multi-pattern scan over forward reference.
+//!   - Collapse candidates by reverse-complement class. **Accept** when **exactly one class** has ≥1 hit.
+//!   - If the winning class has multiple candidate indices with identical sequence, set
+//!     `label_reason="adaptive_kmp_sequence_tie"` and **omit** `label_path` (safety gate).
+//! - **Timeout safety:** each bubble has a hard **120s** *cooperative* deadline. If exceeded at any point,
+//!   emit a minimal record with `label_reason="timeout"` (no label path).
 //! - **ID-free output:** upstream/downstream and endpoints are sequences.
 //! - Coverage: `cov_min` / `cov_mean` prefer **EC:i** per link; fallback to `min(KC:u, KC:v)`.
 //! - **Parallelized** with Rayon (batched to bound memory); global progress via `indicatif`.
@@ -22,31 +28,16 @@
 //! cargo run --release -- <graph.gfa> <bubbles.json|jsonl> <reference.fasta> <out.jsonl>
 //! ```
 //!
-//! ## Output (JSONL per bubble)
-//! Each line is a `BubbleRecord`:
-//! ```json
-//! {
-//!   "bubble_id": 123,
-//!   "k": 31,
-//!   "start_seq": "ATGC...",
-//!   "end_seq":   "TGCA...",
-//!   "upstream": ["..."], "downstream": ["..."],
-//!   "upstream_nodes": [{"seq":"...","cov":42}], "downstream_nodes": [{"seq":"...","cov":17}],
-//!   "nodes": [{"seq":"...","cov":...}],
-//!   "edges": [
-//!     {"source_seq":"...","target_seq":"...","len_nodes":7,"len_bp":37,"cov_min":10,"cov_mean":12.5}
-//!   ],
-//!   "paths": [[0,2,5], [1,4]],
-//!   "label_path": 0,
-//!   "label_reason": "unique_ref_walk" // or "adaptive_kmp", "ambiguous_ref_multi_hit", "no_ref_match"
-//! }
+//! ## Cargo dependency (Cargo.toml)
+//! ```toml
+//! aho-corasick = "1.1"
+//! rayon = "1.10"
+//! indicatif = "0.17"
+//! serde = { version = "1", features = ["derive"] }
+//! serde_json = "1.0"
 //! ```
-//!
-//! ## Notes
-//! - `k` is inferred from the first segment’s sequence length in the GFA.
-//! - JSON input supports `BubbleChain` collections or raw `Bubble` arrays (JSON or JSONL).
-//! - Batching keeps memory usage stable during parallel processing.
 
+use aho_corasick::{AhoCorasickBuilder, MatchKind};
 use indicatif::{ProgressBar, ProgressStyle};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -56,12 +47,11 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::env;
 use std::fs::File;
 use std::io::{BufRead, BufReader, BufWriter, Write};
+use std::time::{Duration, Instant};
+
+const PER_BUBBLE_TIMEOUT_SECS: u64 = 120;
 
 /// Segment (GFA `S` record).
-///
-/// - `id`: numeric segment identifier (required to be numeric in this tool).
-/// - `seq`: segment sequence (uppercase A/C/G/T/N).
-/// - `cov`: node coverage (from `KC:i` if present; otherwise 0).
 #[derive(Debug)]
 struct Segment {
     id: u128,
@@ -70,9 +60,6 @@ struct Segment {
 }
 
 /// Link (GFA `L` record).
-///
-/// - `from` → `to`: numeric segment ids.
-/// - `cov`: edge/link coverage (from `EC:i` if present; otherwise 0).
 #[derive(Debug, Clone)]
 struct Link {
     from: u128,
@@ -87,10 +74,6 @@ struct BubbleChain {
 }
 
 /// A single hyperbubble definition.
-///
-/// - `id`: stable bubble identifier from upstream discovery.
-/// - `ends`: two endpoint node identifiers as strings (numeric content expected).
-/// - `inside`: node identifiers (strings) forming the internal bubble subgraph.
 #[derive(Deserialize)]
 struct Bubble {
     id: usize,
@@ -99,9 +82,6 @@ struct Bubble {
 }
 
 /// A compacted path (“superedge”/unitig) across nodes with coverage aggregates.
-///
-/// `chain` includes endpoints `from` and `to`. The `chain` is **not serialized**;
-/// downstream JSON only exposes endpoint sequences.
 #[derive(Clone, Debug)]
 struct SuperEdge {
     from: u128,
@@ -114,69 +94,44 @@ struct SuperEdge {
 /// JSONL record: ID-free bubble features suitable for GNN ingestion.
 #[derive(Serialize)]
 struct BubbleRecord {
-    /// Bubble identifier (from input).
     bubble_id: usize,
-    /// *k*-mer size inferred from GFA segment sequence length.
     k: usize,
-
-    /// Endpoint sequences.
     start_seq: String,
     end_seq: String,
-
-    /// Greedily selected upstream/downstream neighbor sequences (preset count).
     upstream: Vec<String>,
     downstream: Vec<String>,
-
-    /// Upstream/downstream neighbor nodes with coverage.
     upstream_nodes: Vec<NodeFeature>,
     downstream_nodes: Vec<NodeFeature>,
-
-    /// All supernodes’ sequences (context) with coverage.
     nodes: Vec<NodeFeature>,
-
-    /// Superedges serialized by endpoint sequences and coverage aggregates.
     edges: Vec<EdgeFeature>,
-
-    /// Candidate paths as lists of edge indices into `edges`.
     paths: Vec<Vec<usize>>,
-    /// Chosen label path index (if any).
     label_path: Option<usize>,
-    /// Labeling rationale.
-    /// One of: `"unique_ref_walk"`, `"adaptive_kmp"`, `"ambiguous_ref_multi_hit"`, `"no_ref_match"`.
     label_reason: Option<String>,
 }
 
-/// Node-level feature (sequence + coverage).
 #[derive(Serialize)]
 struct NodeFeature {
     seq: String,
     cov: usize,
 }
 
-/// Edge-level feature between two endpoint sequences with coverage aggregates.
 #[derive(Serialize)]
 struct EdgeFeature {
     source_seq: String,
     target_seq: String,
-    /// Number of nodes in this superedge path (`chain.len()`).
     len_nodes: usize,
-    /// Total base pairs spanned assuming overlapping *k* (`k + len_nodes - 1`, saturating at `k`).
     len_bp: usize,
-    /// Minimum edge coverage across the chain (prefers `EC:i`, else `min(KC)`).
     cov_min: usize,
-    /// Mean edge coverage across the chain.
     cov_mean: f64,
 }
 
-/// Parse a string into `u128` with a clear panic on failure.
-///
-/// Used to normalize string node ids from JSON into numeric form.
+#[inline]
 fn parse_u128(s: &str) -> u128 {
     s.parse::<u128>()
         .unwrap_or_else(|_| panic!("Expected numeric node id, got: {s}"))
 }
 
-/// Reverse-complement of a DNA string (A↔T, C↔G; others→N).
+#[inline]
 fn revcomp(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.bytes().rev() {
@@ -191,16 +146,12 @@ fn revcomp(s: &str) -> String {
     out
 }
 
-/// Parse a GFA file to collect segments, links, and a map of edge coverages.
-///
-/// Coverage preference:
-/// - Edge coverage `EC:i` (per `L` record) if present.
-/// - Otherwise fall back to `min(KC:u, KC:v)` when aggregating.
-///
-/// Returns:
-/// 1) map of `id → Segment`
-/// 2) list of `Link`
-/// 3) map of `(from, to) → EC`
+#[inline]
+fn canonical(seq: &str) -> String {
+    let rc = revcomp(seq);
+    if seq <= &rc { seq.to_string() } else { rc }
+}
+
 fn parse_gfa(
     path: &str,
 ) -> (HashMap<u128, Segment>, Vec<Link>, HashMap<(u128, u128), usize>) {
@@ -212,16 +163,12 @@ fn parse_gfa(
     let mut edge_cov: HashMap<(u128, u128), usize> = HashMap::new();
 
     for line in rdr.lines().flatten() {
-        if line.is_empty() {
-            continue;
-        }
+        if line.is_empty() { continue; }
         let cols: Vec<&str> = line.split('\t').collect();
         match cols.get(0).copied() {
             Some("S") => {
                 if cols.len() < 3 { continue; }
-                let id: u128 = cols[1]
-                    .parse()
-                    .unwrap_or_else(|_| panic!("Non-numeric segment id: {}", cols[1]));
+                let id: u128 = cols[1].parse().unwrap_or_else(|_| panic!("Non-numeric segment id: {}", cols[1]));
                 let seq = cols[2].to_string();
                 let cov = cols.iter()
                     .find_map(|f| {
@@ -233,12 +180,8 @@ fn parse_gfa(
             }
             Some("L") => {
                 if cols.len() < 6 { continue; }
-                let from: u128 = cols[1]
-                    .parse()
-                    .unwrap_or_else(|_| panic!("Non-numeric link from: {}", cols[1]));
-                let to: u128 = cols[3]
-                    .parse()
-                    .unwrap_or_else(|_| panic!("Non-numeric link to: {}", cols[3]));
+                let from: u128 = cols[1].parse().unwrap_or_else(|_| panic!("Non-numeric link from: {}", cols[1]));
+                let to: u128   = cols[3].parse().unwrap_or_else(|_| panic!("Non-numeric link to: {}", cols[3]));
                 let cov = cols.iter()
                     .find_map(|f| {
                         let lf = f.to_ascii_lowercase();
@@ -254,7 +197,6 @@ fn parse_gfa(
     (segs, links, edge_cov)
 }
 
-/// Build adjacency lists for successors and predecessors from segments and links.
 fn build_adj(
     segs: &HashMap<u128, Segment>,
     links: &[Link],
@@ -268,17 +210,8 @@ fn build_adj(
     (succ, pred)
 }
 
-/// Compact simple chains into `SuperEdge`s and compute coverage aggregates.
-///
-/// Compaction respects an induced node set `nodes`. Coverage preference is
-/// `EC:i` when available; otherwise `min(KC:u, KC:v)` is used.
-///
-/// Returns:
-/// - vector of `SuperEdge`s,
-/// - list of “supernodes” (nodes with `in≠1` or `out≠1`) forming endpoints.
 fn compact_with_chains(
     nodes: &HashSet<u128>,
-    //
     succ: &HashMap<u128, Vec<u128>>,
     pred: &HashMap<u128, Vec<u128>>,
     edge_cov: &HashMap<(u128, u128), usize>,
@@ -301,11 +234,9 @@ fn compact_with_chains(
         );
     }
 
-    let mut link_cov = |u: u128, v: u128| -> usize {
+    let link_cov = |u: u128, v: u128| -> usize {
         let ec = edge_cov.get(&(u, v)).copied().unwrap_or(0);
-        if ec > 0 {
-            ec
-        } else {
+        if ec > 0 { ec } else {
             let cu = segments.get(&u).map(|s| s.cov).unwrap_or(0);
             let cv = segments.get(&v).map(|s| s.cov).unwrap_or(0);
             cmp::min(cu, cv)
@@ -356,15 +287,11 @@ fn compact_with_chains(
     (out, supernodes)
 }
 
-/// Return the position of a node in a chain (if present).
+#[inline]
 fn index_in_chain(chain: &[u128], node: u128) -> Option<usize> {
     chain.iter().position(|&x| x == node)
 }
 
-/// Split superedges at a given node, preserving coverage aggregates.
-///
-/// If the split node is interior, two new edges are emitted. Edges that only
-/// touch at endpoints are passed through unchanged.
 fn split_edges_at(node: u128, edges: &[SuperEdge]) -> Vec<SuperEdge> {
     let mut out = Vec::with_capacity(edges.len() + 2);
     for e in edges {
@@ -396,7 +323,6 @@ fn split_edges_at(node: u128, edges: &[SuperEdge]) -> Vec<SuperEdge> {
     out
 }
 
-/// Build an index from `from` node → list of edge indices.
 fn from_index(edges: &[SuperEdge]) -> HashMap<u128, Vec<usize>> {
     let mut m: HashMap<u128, Vec<usize>> = HashMap::new();
     for (i, e) in edges.iter().enumerate() {
@@ -405,9 +331,6 @@ fn from_index(edges: &[SuperEdge]) -> HashMap<u128, Vec<usize>> {
     m
 }
 
-/// Append the *k*-mer from `next_seq` to `assembled` if it overlaps by `k-1`.
-///
-/// Attempts forward first; if mismatch, tries reverse-complement of `next_seq`.
 fn append_next_kmer(assembled: &mut String, next_seq: &str, k: usize) -> bool {
     if assembled.as_bytes()[(assembled.len() - (k - 1))..] == next_seq.as_bytes()[..(k - 1)] {
         assembled.push(next_seq.as_bytes()[k - 1] as char);
@@ -423,16 +346,12 @@ fn append_next_kmer(assembled: &mut String, next_seq: &str, k: usize) -> bool {
     }
 }
 
-/// Assemble a sequence for a chain of nodes (orientation-safe).
-///
-/// Tries starting from the first node as-is; if inconsistent, retries with its RC.
 fn assemble_chain_sequence(
     chain: &[u128],
     segments: &HashMap<u128, Segment>,
     k: usize,
 ) -> Option<String> {
     if chain.is_empty() { return None; }
-    // try direct
     let mut seq = segments[&chain[0]].seq.clone();
     let mut ok = true;
     for node in chain.iter().skip(1) {
@@ -440,7 +359,6 @@ fn assemble_chain_sequence(
         if !append_next_kmer(&mut seq, s, k) { ok = false; break; }
     }
     if ok { return Some(seq); }
-    // retry with RC of first
     let mut seq2 = revcomp(&segments[&chain[0]].seq);
     for node in chain.iter().skip(1) {
         let s = &segments[node].seq;
@@ -449,7 +367,6 @@ fn assemble_chain_sequence(
     Some(seq2)
 }
 
-/// Append a chain’s sequence to an already assembled string (orientation-safe).
 fn append_chain_to_sequence(
     assembled: &mut String,
     chain: &[u128],
@@ -463,13 +380,7 @@ fn append_chain_to_sequence(
     true
 }
 
-/// Enumerate paths from `start` to `end` (and reverse if forward is empty),
-/// assembling orientation-safe path sequences.
-///
-/// Returns `(paths, sequences, reversed)` where:
-/// - `paths` are edge-index lists,
-/// - `sequences` are assembled strings per path,
-/// - `reversed` indicates whether reverse enumeration was used.
+/// Enumerate paths with a **deadline**. If deadline is hit, `timed_out=true`.
 fn enumerate_paths_bidir(
     start: u128,
     end: u128,
@@ -477,7 +388,8 @@ fn enumerate_paths_bidir(
     segments: &HashMap<u128, Segment>,
     k: usize,
     max_paths: usize,
-) -> (Vec<Vec<usize>>, Vec<String>, bool) {
+    deadline: Instant,
+) -> (Vec<Vec<usize>>, Vec<String>, bool, bool) {
     let from_map = from_index(edges);
 
     fn enumerate_from(
@@ -488,7 +400,8 @@ fn enumerate_paths_bidir(
         segments: &HashMap<u128, Segment>,
         k: usize,
         max_paths: usize,
-    ) -> (Vec<Vec<usize>>, Vec<String>) {
+        deadline: Instant,
+    ) -> (Vec<Vec<usize>>, Vec<String>, bool) {
         let mut paths: Vec<Vec<usize>> = Vec::new();
         let mut seqs: Vec<String> = Vec::new();
         let mut stack: Vec<(u128, Vec<usize>, String)> = Vec::new();
@@ -503,6 +416,7 @@ fn enumerate_paths_bidir(
 
         let guard_max_steps = 2000usize;
         while let Some((at, idxs, seq)) = stack.pop() {
+            if Instant::now() >= deadline { return (paths, seqs, true); }
             if paths.len() >= max_paths { break; }
             if at == t {
                 paths.push(idxs.clone());
@@ -512,6 +426,7 @@ fn enumerate_paths_bidir(
             if idxs.len() > guard_max_steps { continue; }
             if let Some(eidxs) = from_map.get(&at) {
                 for &ei in eidxs {
+                    if Instant::now() >= deadline { return (paths, seqs, true); }
                     let e = &edges[ei];
                     let mut seq2 = seq.clone();
                     if append_chain_to_sequence(&mut seq2, &e.chain, segments, k) {
@@ -522,20 +437,15 @@ fn enumerate_paths_bidir(
                 }
             }
         }
-        (paths, seqs)
+        (paths, seqs, false)
     }
 
-    // forward
-    let (p_fwd, s_fwd) = enumerate_from(start, end, edges, &from_map, segments, k, max_paths);
-    if !p_fwd.is_empty() {
-        return (p_fwd, s_fwd, false);
-    }
-    // reverse
-    let (p_rev, s_rev) = enumerate_from(end, start, edges, &from_map, segments, k, max_paths);
-    (p_rev, s_rev, true)
+    let (p_fwd, s_fwd, to1) = enumerate_from(start, end, edges, &from_map, segments, k, max_paths, deadline);
+    if !p_fwd.is_empty() || to1 { return (p_fwd, s_fwd, false, to1); }
+    let (p_rev, s_rev, to2) = enumerate_from(end, start, edges, &from_map, segments, k, max_paths, deadline);
+    (p_rev, s_rev, true, to2)
 }
 
-/// Compute global in/out-degrees for the whole graph (used in labeling).
 fn compute_global_deg(
     succ: &HashMap<u128, Vec<u128>>,
     _pred: &HashMap<u128, Vec<u128>>,
@@ -554,11 +464,9 @@ fn compute_global_deg(
     (indeg, outdeg)
 }
 
-/// Gather a unique-degree chain from a seed by repeatedly following the sole
-/// successor (or predecessor), capped by `nodes_cap`.
 fn gather_unique_chain(
     seed: u128,
-    forward: bool, // true successors (right), false predecessors (left)
+    forward: bool,
     succ: &HashMap<u128, Vec<u128>>,
     pred: &HashMap<u128, Vec<u128>>,
     indeg: &HashMap<u128, usize>,
@@ -584,8 +492,6 @@ fn gather_unique_chain(
     chain
 }
 
-/// Assemble sequence for an ordered list of node ids. Returns assembled string
-/// and extra bp beyond the first *k* (or zero on failure).
 fn sequence_for_nodes(
     nodes: &[u128],
     segments: &HashMap<u128, Segment>,
@@ -596,7 +502,6 @@ fn sequence_for_nodes(
     for node in nodes.iter().skip(1) {
         let s = &segments[node].seq;
         if !append_next_kmer(&mut seq, s, k) {
-            // retry with RC of first
             let mut seq2 = revcomp(&segments[&nodes[0]].seq);
             for node2 in nodes.iter().skip(1) {
                 let s2 = &segments[node2].seq;
@@ -610,10 +515,6 @@ fn sequence_for_nodes(
     Some((seq, extra))
 }
 
-/// Compute left/right flanking sequences by walking unique-degree chains from
-/// the endpoints up to `max_bp` (converted to node count by `k`).
-///
-/// Returns `(left_bp, right_bp)` excluding the overlapping *k*.
 fn compute_flanks(
     start: u128,
     end: u128,
@@ -642,54 +543,6 @@ fn compute_flanks(
     (left_bp.to_string(), right_bp.to_string())
 }
 
-/// Build KMP prefix function (LPS array) for a pattern.
-fn kmp_build(pat: &str) -> Vec<usize> {
-    let m = pat.len();
-    let pb = pat.as_bytes();
-    let mut lps = vec![0usize; m];
-    let mut len = 0usize;
-    let mut i = 1usize;
-    while i < m {
-        if pb[i] == pb[len] {
-            len += 1;
-            lps[i] = len;
-            i += 1;
-        } else if len != 0 {
-            len = lps[len - 1];
-        } else {
-            lps[i] = 0;
-            i += 1;
-        }
-    }
-    lps
-}
-
-/// Find all occurrences of `pat` in `text` using KMP. Returns start indices.
-fn kmp_search_all(pat: &str, text: &str) -> Vec<usize> {
-    if pat.is_empty() { return vec![]; }
-    let lps = kmp_build(pat);
-    let pb = pat.as_bytes();
-    let tb = text.as_bytes();
-    let mut res = Vec::new();
-    let mut i = 0usize;
-    let mut j = 0usize;
-    while i < tb.len() {
-        if tb[i] == pb[j] {
-            i += 1; j += 1;
-            if j == pb.len() {
-                res.push(i - j);
-                j = lps[j - 1];
-            }
-        } else if j != 0 {
-            j = lps[j - 1];
-        } else {
-            i += 1;
-        }
-    }
-    res
-}
-
-/// A reference chromosome with both forward and reverse-complement sequences.
 #[derive(Clone)]
 struct Chrom {
     name: String,
@@ -697,13 +550,11 @@ struct Chrom {
     rc_seq: String,
 }
 
-/// Reference text container for all chromosomes (both strands).
 struct RefText {
     chroms: Vec<Chrom>,
 }
 
 impl RefText {
-    /// Load a FASTA file into `RefText`, computing reverse-complements.
     fn load_fasta(path: &str) -> Self {
         let f = File::open(path).expect("open FASTA");
         let rdr = BufReader::new(f);
@@ -732,11 +583,9 @@ impl RefText {
     }
 }
 
-/// Reference position of a *k*-mer.
 #[derive(Clone, Copy, Debug)]
-struct Pos { chrom: usize, pos: usize, rev: bool } // rev=false => forward strand
+struct Pos { chrom: usize, pos: usize, rev: bool }
 
-/// Find all occurrences of a *k*-mer on both strands of the reference.
 fn all_kmer_pos(reftext: &RefText, kmer: &str) -> Vec<Pos> {
     fn scan(hay: &str, needle: &str, chrom: usize, rev: bool, out: &mut Vec<Pos>) {
         if needle.is_empty() || hay.len() < needle.len() { return; }
@@ -758,8 +607,6 @@ fn all_kmer_pos(reftext: &RefText, kmer: &str) -> Vec<Pos> {
     out
 }
 
-/// Extract the reference substring between two *k*-mer positions on the same
-/// chromosome and strand, inclusive of both end *k*-mers.
 fn ref_substr_between(reftext: &RefText, a: Pos, b: Pos, k: usize) -> Option<String> {
     if a.chrom != b.chrom || a.rev != b.rev { return None; }
     let c = &reftext.chroms[a.chrom];
@@ -777,15 +624,10 @@ fn ref_substr_between(reftext: &RefText, a: Pos, b: Pos, k: usize) -> Option<Str
     None
 }
 
-/// Minimal Unique Extension (MUE) of a base *k*-mer on the reference.
-///
-/// Iteratively extends to the right (`extend_right=true`) or left (`false`)
-/// until a unique occurrence is found or `max_ext` is reached. Returns the
-/// extension length and the unique position if successful.
 fn minimal_unique_extension(
     reftext: &RefText,
     base_kmer: &str,
-    extend_right: bool, // true for start(+), false for end(+)
+    extend_right: bool,
     max_ext: usize,
 ) -> Option<(usize, Pos)> {
     let mut occ = all_kmer_pos(reftext, base_kmer);
@@ -827,13 +669,7 @@ fn minimal_unique_extension(
     None
 }
 
-/// Primary labeler: compare candidate path sequences against the exact
-/// reference substring between endpoint *k*-mers (both strands).
-///
-/// If endpoints are repetitive, optionally applies MUE to disambiguate.
-///
-/// Returns `(Some(index), "unique_ref_walk")` on a unique match; otherwise
-/// `(None, reason)` where `reason` is `"no_ref_match"` or `"ambiguous_ref_multi_hit"`.
+/// Primary labeler (with deadline checks).
 fn label_with_ref_walk(
     candidate_seqs: &[String],
     start_seq: &str,
@@ -841,14 +677,18 @@ fn label_with_ref_walk(
     reftext: &RefText,
     k: usize,
     try_mue: bool,
+    deadline: Instant,
 ) -> (Option<usize>, String) {
     let mut starts = all_kmer_pos(reftext, start_seq);
     let mut ends   = all_kmer_pos(reftext, end_seq);
 
-    if try_mue && (starts.len() > 8 || ends.len() > 8) {
+    if Instant::now() >= deadline { return (None, "timeout".into()); }
+
+    if try_mue && (starts.len() > 2 || ends.len() > 2) {
         if let Some((_e, p)) = minimal_unique_extension(reftext, start_seq, true, 4096) {
             starts = vec![p];
         }
+        if Instant::now() >= deadline { return (None, "timeout".into()); }
         if let Some((_e, p)) = minimal_unique_extension(reftext, end_seq, false, 4096) {
             ends = vec![p];
         }
@@ -856,16 +696,18 @@ fn label_with_ref_walk(
 
     let mut matches: Vec<usize> = Vec::new();
     for s in &starts {
+        if Instant::now() >= deadline { return (None, "timeout".into()); }
         for e in &ends {
+            if Instant::now() >= deadline { return (None, "timeout".into()); }
             if s.chrom != e.chrom || s.rev != e.rev { continue; }
             if let Some(ref_sub) = ref_substr_between(reftext, *s, *e, k) {
                 let refb = ref_sub.as_bytes();
                 for (i, cand) in candidate_seqs.iter().enumerate() {
+                    if Instant::now() >= deadline { return (None, "timeout".into()); }
                     let cb = cand.as_bytes();
                     if refb.len() == cb.len() && refb == cb {
                         matches.push(i);
                     } else {
-                        // also try reverse-complement of candidate
                         let rc = revcomp(cand);
                         if refb.len() == rc.len() && refb == rc.as_bytes() {
                             matches.push(i);
@@ -887,12 +729,10 @@ fn label_with_ref_walk(
     }
 }
 
-/// Fallback labeler: adaptively extend flanks and search with exact KMP on
-/// both strands. Chooses the unique path that yields exactly one global hit.
-///
-/// Returns `(Some(index), used_flank_bp)` on success; otherwise `(None, max_flank_bp*2)`.
-fn label_with_adaptive_flanks(
-    candidate_seqs: &[String], // per path (already orientation-safe within bubble)
+/// Lenient multi-locus labeling via Aho–Corasick, with deadline.
+/// Returns: (Some(rep_idx), used_flank_bp, sequence_tie, timed_out)
+fn label_with_adaptive_flanks_lenient_ac(
+    candidate_seqs: &[String],
     start: u128,
     end: u128,
     succ: &HashMap<u128, Vec<u128>>,
@@ -900,58 +740,279 @@ fn label_with_adaptive_flanks(
     segments: &HashMap<u128, Segment>,
     k: usize,
     reftext: &RefText,
-) -> (Option<usize>, usize) {
-    let (indeg, outdeg) = compute_global_deg(succ, pred);
-    let max_flank_bp = 4096usize;
-    let (left_full, right_full) =
-        compute_flanks(start, end, succ, pred, &indeg, &outdeg, segments, k, max_flank_bp);
+    deadline: Instant,
+) -> (Option<usize>, usize, bool, bool) {
+    use std::collections::{HashMap, HashSet};
 
-    let flanks = [0usize, 32, 64, 128, 256, 512, 1024, 2048, 4096];
-
-    for delta in flanks {
-        let left_tail = if left_full.len() > delta {
-            &left_full[left_full.len() - delta..]
-        } else { &left_full[..] };
-        let right_head = if right_full.len() > delta {
-            &right_full[..delta]
-        } else { &right_full[..] };
-
-        let mut hits_per_path: Vec<usize> = Vec::with_capacity(candidate_seqs.len());
-        for seq in candidate_seqs {
-            // try both strands by checking seq and revcomp(seq) as separate queries
-            let extended_f = format!("{left}{mid}{right}", left = left_tail, mid = seq, right = right_head);
-            let extended_r = format!("{left}{mid}{right}", left = left_tail, mid = revcomp(seq), right = right_head);
-            let mut total = 0usize;
-            for chrom in reftext.chroms.iter() {
-                total += kmp_search_all(&extended_f, &chrom.seq).len();
-                total += kmp_search_all(&extended_f, &chrom.rc_seq).len();
-                total += kmp_search_all(&extended_r, &chrom.seq).len();
-                total += kmp_search_all(&extended_r, &chrom.rc_seq).len();
-            }
-            hits_per_path.push(total);
-        }
-
-        let mut unique_idx: Option<usize> = None;
-        let mut bad = false;
-        for (i, &h) in hits_per_path.iter().enumerate() {
-            match h {
-                0 => {}
-                1 => { if unique_idx.is_none() { unique_idx = Some(i); } else { bad = true; break; } }
-                _ => { bad = true; break; }
-            }
-        }
-        if !bad {
-            if let Some(i) = unique_idx {
-                return (Some(i), delta * 2);
-            }
-        }
+    // Collapse candidates into RC-equivalence classes.
+    let mut class_map: HashMap<String, (usize, Vec<usize>)> = HashMap::new(); // key -> (rep_idx, members)
+    for (i, s) in candidate_seqs.iter().enumerate() {
+        let key = canonical(s);
+        class_map.entry(key).and_modify(|(_, v)| v.push(i)).or_insert((i, vec![i]));
     }
-    (None, max_flank_bp * 2)
+    let classes: Vec<(String, usize, Vec<usize>)> = class_map
+        .into_iter().map(|(k, (rep, mem))| (k, rep, mem)).collect();
+
+    if Instant::now() >= deadline { return (None, 0, false, true); }
+
+    // Build flanks once up to a generous cap and try increasing deltas.
+    let max_flank_bp = 4_096usize;
+    let (indeg, outdeg) = compute_global_deg(succ, pred);
+    let (left_full, right_full) = compute_flanks(start, end, succ, pred, &indeg, &outdeg, segments, k, max_flank_bp);
+
+    let flanks: &[usize] = &[0, 32, 64, 128, 256, 512, 1024, 2048, 4096];
+
+    for d in flanks {
+        if Instant::now() >= deadline { return (None, d * 2, false, true); }
+        let left_tail  = if left_full.len()  > *d { &left_full[left_full.len() - *d..] } else { &left_full[..] };
+        let right_head = if right_full.len() > *d { &right_full[..*d] } else { &right_full[..] };
+
+        // Build patterns: for each class, forward + reverse pattern (two per class).
+        let mut patterns: Vec<String> = Vec::with_capacity(classes.len() * 2);
+        for (class_seq, _, _) in classes.iter() {
+            patterns.push(format!("{left}{mid}{right}", left = left_tail, mid = class_seq, right = right_head));
+            patterns.push(format!("{left}{mid}{right}", left = left_tail, mid = revcomp(class_seq), right = right_head));
+        }
+
+        if Instant::now() >= deadline { return (None, d * 2, false, true); }
+
+        // Build AC automaton.
+        let ac = AhoCorasickBuilder::new()
+            .match_kind(MatchKind::LeftmostFirst)
+            .build(patterns.iter().map(|s| s.as_str()))
+            .expect("Failed to build Aho–Corasick automaton");
+
+        // Count unique sites per class on forward reference only (patterns include RC).
+        let mut class_hits: Vec<usize> = vec![0; classes.len()];
+        let mut seen: HashSet<(usize, usize, usize)> = HashSet::new(); // (chrom_ix, start, pat_mod2)
+
+        for (cx, chrom) in reftext.chroms.iter().enumerate() {
+            if Instant::now() >= deadline { return (None, d * 2, false, true); }
+            for m in ac.find_iter(&chrom.seq) {
+                let pid_usize = m.pattern().as_usize(); // PatternID -> usize
+                let class_ix = pid_usize / 2;
+                let dir_mod  = pid_usize % 2;
+                let key = (cx, m.start(), dir_mod);
+                if seen.insert(key) {
+                    class_hits[class_ix] += 1;
+                }
+            }
+        }
+
+        // Accept if exactly one sequence class has ≥1 hits.
+        let winners: Vec<usize> = class_hits.iter().enumerate().filter_map(|(i, &h)| (h > 0).then_some(i)).collect();
+        if winners.len() == 1 {
+            let ci = winners[0];
+            let rep_idx = classes[ci].1;
+            let topology_tie = classes[ci].2.len() > 1; // multiple candidate paths share the same string
+            return (Some(rep_idx), d * 2, topology_tie, false);
+        }
+        // else extend flanks and try again
+    }
+
+    (None, max_flank_bp * 2, false, false)
 }
 
-/// Choose the “best” neighbor by (EC desc, KC desc, id asc) for determinism.
-///
-/// Direction controlled by `forward`: `true` uses successors, `false` predecessors.
+fn count_bubbles_file(path: &str) -> usize {
+    let in_file = File::open(path).expect("open bubbles json/jsonl");
+    let reader = BufReader::new(in_file);
+    let stream = Deserializer::from_reader(reader).into_iter::<Value>();
+    let mut total = 0usize;
+    for val in stream {
+        let Ok(v) = val else { continue };
+        if v.is_object() {
+            let map = v.as_object().unwrap();
+            for vv in map.values() {
+                if let Ok(bc) = serde_json::from_value::<BubbleChain>(vv.clone()) {
+                    total += bc.bubbles.len();
+                }
+            }
+        } else if v.is_array() {
+            if let Ok(bcs) = serde_json::from_value::<Vec<BubbleChain>>(v.clone()) {
+                for bc in bcs { total += bc.bubbles.len(); }
+            } else if let Ok(bs) = serde_json::from_value::<Vec<Bubble>>(v.clone()) {
+                total += bs.len();
+            }
+        } else if let Ok(bc) = serde_json::from_value::<BubbleChain>(v.clone()) {
+            total += bc.bubbles.len();
+        }
+    }
+    total
+}
+
+/// Build a single JSON line (`BubbleRecord`) with a deadline.
+/// If `timeout` occurs anywhere, returns a record with `label_reason="timeout"`.
+fn build_record_json(
+    bubble: &Bubble,
+    k: usize,
+    succ: &HashMap<u128, Vec<u128>>,
+    pred: &HashMap<u128, Vec<u128>>,
+    segments: &HashMap<u128, Segment>,
+    edge_cov: &HashMap<(u128, u128), usize>,
+    reftext: &RefText,
+    radius_context: usize,
+    flank_kmers: usize,
+    max_paths: usize,
+    deadline: Instant,
+) -> Option<String> {
+    if bubble.ends.len() != 2 { return None; }
+    let start: u128 = parse_u128(&bubble.ends[0]);
+    let end: u128   = parse_u128(&bubble.ends[1]);
+
+    // Induced subgraph nodes (bubble + context)
+    let inside: HashSet<u128> = bubble.inside.iter().map(|s| parse_u128(s)).collect();
+    let nodes: HashSet<u128> =
+        collect_nodes_for_bubble_context(&inside, start, end, succ, pred, radius_context);
+
+    if Instant::now() >= deadline {
+        return Some(serde_json::to_string(&BubbleRecord {
+            bubble_id: bubble.id, k,
+            start_seq: segments.get(&start).map(|s| s.seq.clone()).unwrap_or_default(),
+            end_seq: segments.get(&end).map(|s| s.seq.clone()).unwrap_or_default(),
+            upstream: vec![], downstream: vec![],
+            upstream_nodes: vec![], downstream_nodes: vec![],
+            nodes: vec![], edges: vec![], paths: vec![],
+            label_path: None, label_reason: Some("timeout".into()),
+        }).unwrap());
+    }
+
+    // Compact (with EC fallback to KC) and split endpoints
+    let (superedges0, supernodes0) = compact_with_chains(&nodes, succ, pred, edge_cov, segments);
+    let mut superedges = split_edges_at(start, &superedges0);
+    superedges = split_edges_at(end, &superedges);
+
+    // Enumerate paths + sequences (bidirectional)
+    let (paths_vec, seqs_vec, _reversed, to_enum) =
+        enumerate_paths_bidir(start, end, &superedges, segments, k, max_paths, deadline);
+
+    // ------- Preset flanks to export: greedily take exactly N neighbors if available -------
+    let upstream_ids: Vec<u128> = collect_flanks_greedy(
+        start, /*forward=*/false, succ, pred, segments, edge_cov, flank_kmers
+    );
+    let downstream_ids: Vec<u128> = collect_flanks_greedy(
+        end, /*forward=*/true, succ, pred, segments, edge_cov, flank_kmers
+    );
+
+    // Start building record
+    let mut rec = BubbleRecord {
+        bubble_id: bubble.id,
+        k,
+        start_seq: segments.get(&start).map(|s| s.seq.clone()).unwrap_or_default(),
+        end_seq:   segments.get(&end).map(|s| s.seq.clone()).unwrap_or_default(),
+        upstream: upstream_ids
+            .iter().filter_map(|nid| segments.get(nid).map(|s| s.seq.clone())).collect(),
+        downstream: downstream_ids
+            .iter().filter_map(|nid| segments.get(nid).map(|s| s.seq.clone())).collect(),
+        upstream_nodes: upstream_ids
+            .iter().filter_map(|nid| segments.get(nid))
+            .map(|s| NodeFeature { seq: s.seq.clone(), cov: s.cov }).collect(),
+        downstream_nodes: downstream_ids
+            .iter().filter_map(|nid| segments.get(nid))
+            .map(|s| NodeFeature { seq: s.seq.clone(), cov: s.cov }).collect(),
+        nodes: Vec::new(),
+        edges: Vec::new(),
+        paths: paths_vec.clone(),
+        label_path: None,
+        label_reason: None,
+    };
+
+    for &nid in &supernodes0 {
+        if let Some(seg) = segments.get(&nid) {
+            rec.nodes.push(NodeFeature { seq: seg.seq.clone(), cov: seg.cov });
+        }
+    }
+
+    for e in superedges.iter() {
+        let len_nodes = e.chain.len();
+        let len_bp = k + len_nodes.saturating_sub(1);
+        let source_seq = segments.get(&e.from).map(|s| s.seq.clone()).unwrap_or_default();
+        let target_seq = segments.get(&e.to).map(|s| s.seq.clone()).unwrap_or_default();
+
+        rec.edges.push(EdgeFeature {
+            source_seq,
+            target_seq,
+            len_nodes,
+            len_bp,
+            cov_min: e.cov_min,
+            cov_mean: e.cov_mean,
+        });
+    }
+
+    if to_enum || Instant::now() >= deadline {
+        rec.label_path = None;
+        rec.label_reason = Some("timeout".into());
+        return Some(serde_json::to_string(&rec).unwrap());
+    }
+
+    // --- Labeling cascade ---
+    if !seqs_vec.is_empty() {
+        let (lab1, why1) = label_with_ref_walk(
+            &seqs_vec,
+            &segments[&start].seq,
+            &segments[&end].seq,
+            reftext,
+            k,
+            /*try_mue=*/true,
+            deadline,
+        );
+        if why1 == "timeout" {
+            rec.label_reason = Some("timeout".into());
+            return Some(serde_json::to_string(&rec).unwrap());
+        }
+        if let Some(ix) = lab1 {
+            rec.label_path = Some(ix);
+            rec.label_reason = Some(why1);
+        } else {
+            let (lab2, _bp, seq_tie, timed_out) = label_with_adaptive_flanks_lenient_ac(
+                &seqs_vec, start, end, succ, pred, segments, k, reftext, deadline
+            );
+            if timed_out {
+                rec.label_reason = Some("timeout".into());
+            } else if lab2.is_some() && !seq_tie {
+                rec.label_path = lab2;
+                rec.label_reason = Some("adaptive_kmp".into());
+            } else if lab2.is_some() && seq_tie {
+                // Sequence consensus achieved but multiple path indices share that string.
+                // Safety: do not set label_path.
+                rec.label_path = None;
+                rec.label_reason = Some("adaptive_kmp_sequence_tie".into());
+            } else {
+                rec.label_reason = Some(why1); // "no_ref_match" or "ambiguous_ref_multi_hit"
+            }
+        }
+    } else {
+        rec.label_reason = Some("no_paths".into());
+    }
+
+    Some(serde_json::to_string(&rec).unwrap())
+}
+
+fn collect_flanks_greedy(
+    seed: u128,
+    forward: bool,
+    succ: &HashMap<u128, Vec<u128>>,
+    pred: &HashMap<u128, Vec<u128>>,
+    segments: &HashMap<u128, Segment>,
+    edge_cov: &HashMap<(u128, u128), usize>,
+    n: usize,
+) -> Vec<u128> {
+    use std::collections::HashSet;
+    let mut out: Vec<u128> = Vec::with_capacity(n);
+    let mut cur = seed;
+    let mut seen: HashSet<u128> = HashSet::new();
+    seen.insert(seed);
+
+    for _ in 0..n {
+        if let Some(nx) = best_neighbor(cur, forward, succ, pred, segments, edge_cov) {
+            if seen.contains(&nx) { break; } // avoid tiny cycles
+            out.push(nx);
+            seen.insert(nx);
+            cur = nx;
+        } else { break; }
+    }
+    out
+}
+
 fn best_neighbor(
     cur: u128,
     forward: bool,
@@ -990,38 +1051,6 @@ fn best_neighbor(
     best_id
 }
 
-/// Collect exactly `n` neighbors greedily from `seed` in the given direction,
-/// avoiding tiny cycles. Used for exporting preset flanks.
-fn collect_flanks_greedy(
-    seed: u128,
-    forward: bool,
-    succ: &HashMap<u128, Vec<u128>>,
-    pred: &HashMap<u128, Vec<u128>>,
-    segments: &HashMap<u128, Segment>,
-    edge_cov: &HashMap<(u128, u128), usize>,
-    n: usize,
-) -> Vec<u128> {
-    use std::collections::HashSet;
-    let mut out: Vec<u128> = Vec::with_capacity(n);
-    let mut cur = seed;
-    let mut seen: HashSet<u128> = HashSet::new();
-    seen.insert(seed);
-
-    for _ in 0..n {
-        if let Some(nx) = best_neighbor(cur, forward, succ, pred, segments, edge_cov) {
-            if seen.contains(&nx) { break; } // avoid tiny cycles
-            out.push(nx);
-            seen.insert(nx);
-            cur = nx;
-        } else { break; }
-    }
-    out
-}
-
-/// Collect an induced node set for a bubble context by expanding:
-/// - upstream from `start` by `radius`,
-/// - downstream from `end` by `radius`,
-/// and uniting with the bubble’s internal nodes.
 fn collect_nodes_for_bubble_context(
     inside: &HashSet<u128>,
     start: u128,
@@ -1070,175 +1099,6 @@ fn collect_nodes_for_bubble_context(
     nodes
 }
 
-/// Count total bubbles in a JSON/JSONL file without loading everything into memory.
-/// Supports `BubbleChain` objects, arrays of `BubbleChain`, or arrays of `Bubble`.
-fn count_bubbles_file(path: &str) -> usize {
-    let in_file = File::open(path).expect("open bubbles json/jsonl");
-    let reader = BufReader::new(in_file);
-    let stream = Deserializer::from_reader(reader).into_iter::<Value>();
-    let mut total = 0usize;
-    for val in stream {
-        let Ok(v) = val else { continue };
-        if v.is_object() {
-            let map = v.as_object().unwrap();
-            for vv in map.values() {
-                if let Ok(bc) = serde_json::from_value::<BubbleChain>(vv.clone()) {
-                    total += bc.bubbles.len();
-                }
-            }
-        } else if v.is_array() {
-            if let Ok(bcs) = serde_json::from_value::<Vec<BubbleChain>>(v.clone()) {
-                for bc in bcs { total += bc.bubbles.len(); }
-            } else if let Ok(bs) = serde_json::from_value::<Vec<Bubble>>(v.clone()) {
-                total += bs.len();
-            }
-        } else if let Ok(bc) = serde_json::from_value::<BubbleChain>(v.clone()) {
-            total += bc.bubbles.len();
-        }
-    }
-    total
-}
-
-/// Build a single JSON line (`BubbleRecord`) for a bubble by:
-/// 1) building an induced context, compacting to superedges,
-/// 2) splitting at endpoints,
-/// 3) enumerating candidate paths with orientation-safe assembly,
-/// 4) labeling via reference walk (MUE optional), then fallback adaptive flanks + KMP,
-/// 5) exporting preset greedy flanks (sequence lists and node features),
-/// 6) serializing **ID-free** features.
-///
-/// Returns `None` if bubble endpoints are malformed.
-fn build_record_json(
-    bubble: &Bubble,
-    k: usize,
-    succ: &HashMap<u128, Vec<u128>>,
-    pred: &HashMap<u128, Vec<u128>>,
-    segments: &HashMap<u128, Segment>,
-    edge_cov: &HashMap<(u128, u128), usize>,
-    reftext: &RefText,
-    radius_context: usize,
-    flank_kmers: usize,
-    max_paths: usize,
-) -> Option<String> {
-    if bubble.ends.len() != 2 { return None; }
-    let start: u128 = parse_u128(&bubble.ends[0]);
-    let end: u128   = parse_u128(&bubble.ends[1]);
-
-    // Induced subgraph nodes (bubble + context)
-    let inside: HashSet<u128> = bubble.inside.iter().map(|s| parse_u128(s)).collect();
-    let nodes: HashSet<u128> =
-        collect_nodes_for_bubble_context(&inside, start, end, succ, pred, radius_context);
-
-    // Compact (with EC fallback to KC)
-    let (superedges0, supernodes0) = compact_with_chains(&nodes, succ, pred, edge_cov, segments);
-
-    // Split at endpoints
-    let mut superedges = split_edges_at(start, &superedges0);
-    superedges = split_edges_at(end, &superedges);
-
-    // Enumerate paths + sequences (bidirectional)
-    let (paths_vec, seqs_vec, _reversed) =
-        enumerate_paths_bidir(start, end, &superedges, segments, k, max_paths);
-
-    // --- Labeling cascade ---
-    let mut label_opt: Option<usize> = None;
-    let mut label_reason: Option<String> = None;
-
-    if !seqs_vec.is_empty() {
-        // 1) Reference-anchored walk (with MUE if endpoints are repetitive)
-        let (lab1, why1) = label_with_ref_walk(
-            &seqs_vec,
-            &segments[&start].seq,
-            &segments[&end].seq,
-            reftext,
-            k,
-            /*try_mue=*/true
-        );
-        if lab1.is_some() {
-            label_opt = lab1;
-            label_reason = Some(why1);
-        } else {
-            // 2) Fallback: adaptive flanks + KMP (both strands)
-            let (lab2, _bp) = label_with_adaptive_flanks(
-                &seqs_vec, start, end, succ, pred, segments, k, reftext
-            );
-            if lab2.is_some() {
-                label_opt = lab2;
-                label_reason = Some("adaptive_kmp".into());
-            } else {
-                label_reason = Some(why1); // keep "no_ref_match"/"ambiguous_ref_multi_hit"
-            }
-        }
-    }
-
-    // ------- Preset flanks to export: greedily take exactly N neighbors if available -------
-    let upstream_ids: Vec<u128> = collect_flanks_greedy(
-        start, /*forward=*/false, succ, pred, segments, edge_cov, flank_kmers
-    );
-    let downstream_ids: Vec<u128> = collect_flanks_greedy(
-        end, /*forward=*/true, succ, pred, segments, edge_cov, flank_kmers
-    );
-
-    // Build JSON record (ID-free)
-    let mut rec = BubbleRecord {
-        bubble_id: bubble.id,
-        k,
-        start_seq: segments.get(&start).map(|s| s.seq.clone()).unwrap_or_default(),
-        end_seq:   segments.get(&end).map(|s| s.seq.clone()).unwrap_or_default(),
-
-        upstream: upstream_ids
-            .iter().filter_map(|nid| segments.get(nid).map(|s| s.seq.clone())).collect(),
-        downstream: downstream_ids
-            .iter().filter_map(|nid| segments.get(nid).map(|s| s.seq.clone())).collect(),
-
-        upstream_nodes: upstream_ids
-            .iter().filter_map(|nid| segments.get(nid))
-            .map(|s| NodeFeature { seq: s.seq.clone(), cov: s.cov }).collect(),
-        downstream_nodes: downstream_ids
-            .iter().filter_map(|nid| segments.get(nid))
-            .map(|s| NodeFeature { seq: s.seq.clone(), cov: s.cov }).collect(),
-
-        nodes: Vec::new(),
-        edges: Vec::new(),
-        paths: paths_vec.clone(),
-        label_path: label_opt,
-        label_reason,
-    };
-
-    // Supernodes (as sequences)
-    for &nid in &supernodes0 {
-        if let Some(seg) = segments.get(&nid) {
-            rec.nodes.push(NodeFeature { seq: seg.seq.clone(), cov: seg.cov });
-        }
-    }
-
-    // Serialize edges with endpoint sequences only
-    for e in superedges.iter() {
-        let len_nodes = e.chain.len();
-        let len_bp = k + len_nodes.saturating_sub(1);
-
-        let source_seq = segments.get(&e.from).map(|s| s.seq.clone()).unwrap_or_default();
-        let target_seq = segments.get(&e.to).map(|s| s.seq.clone()).unwrap_or_default();
-
-        rec.edges.push(EdgeFeature {
-            source_seq,
-            target_seq,
-            len_nodes,
-            len_bp,
-            cov_min: e.cov_min,
-            cov_mean: e.cov_mean,
-        });
-    }
-
-    Some(serde_json::to_string(&rec).unwrap())
-}
-
-/// Program entry point.
-///
-/// - Loads GFA graph and reference FASTA.
-/// - Streams bubbles from JSON/JSONL (various shapes supported).
-/// - Processes in **parallel batches** with progress bar.
-/// - Writes one JSON line per bubble to `<out.jsonl>`.
 fn main() {
     let args: Vec<String> = env::args().collect();
     if args.len() != 5 {
@@ -1253,11 +1113,11 @@ fn main() {
     let ref_fa = &args[3];
     let out_path = &args[4];
 
-    // Tunables
-    let radius_context: usize = 5;  // nodes to include around bubble for compaction
-    let flank_kmers: usize = 5;     // preset number of upstream/downstream kmers to export
-    let max_paths: usize = 256;     // candidate cap per bubble
-    const BATCH: usize = 1000;      // bubbles per parallel batch (tweak for memory/CPU)
+    // Tunables (safe defaults; feel free to raise for more recall)
+    let radius_context: usize = 12;   // nodes to include around bubble for compaction
+    let flank_kmers: usize = 5;       // preset number of upstream/downstream kmers to export
+    let max_paths: usize = 2048;      // candidate cap per bubble
+    const BATCH: usize = 200;         // bubbles per parallel batch (tweak for memory/CPU)
 
     // Load graph + reference
     let (segments, links, edge_cov) = parse_gfa(gfa_path);
@@ -1324,15 +1184,17 @@ fn main() {
         for b in bubbles {
             batch.push(b);
             if batch.len() == BATCH {
-                // Process a batch in parallel; keep per-batch order deterministic
+                // Move out the batch to avoid borrow issues, then process in parallel.
+                let curr_batch: Vec<Bubble> = std::mem::take(&mut batch);
                 let pb_for_threads = pb.clone();
-                let mut lines: Vec<(usize, String)> = batch
+                let mut lines: Vec<(usize, String)> = curr_batch
                     .par_iter()
                     .enumerate()
                     .map_init(|| pb_for_threads.clone(), |pbl, (i, bub)| {
+                        let deadline = Instant::now() + Duration::from_secs(PER_BUBBLE_TIMEOUT_SECS);
                         let out = build_record_json(
                             bub, k, &succ, &pred, &segments, &edge_cov, &reftext,
-                            radius_context, flank_kmers, max_paths,
+                            radius_context, flank_kmers, max_paths, deadline,
                         );
                         pbl.inc(1);
                         (i, out)
@@ -1345,22 +1207,23 @@ fn main() {
                     w.write_all(line.as_bytes()).unwrap();
                     w.write_all(b"\n").unwrap();
                 }
-                total_written += batch.len();
-                batch.clear();
+                total_written += curr_batch.len();
             }
         }
     }
 
     // flush tail
     if !batch.is_empty() {
+        let curr_batch: Vec<Bubble> = std::mem::take(&mut batch);
         let pb_for_threads = pb.clone();
-        let mut lines: Vec<(usize, String)> = batch
+        let mut lines: Vec<(usize, String)> = curr_batch
             .par_iter()
             .enumerate()
             .map_init(|| pb_for_threads.clone(), |pbl, (i, bub)| {
+                let deadline = Instant::now() + Duration::from_secs(PER_BUBBLE_TIMEOUT_SECS);
                 let out = build_record_json(
                     bub, k, &succ, &pred, &segments, &edge_cov, &reftext,
-                    radius_context, flank_kmers, max_paths,
+                    radius_context, flank_kmers, max_paths, deadline,
                 );
                 pbl.inc(1);
                 (i, out)
@@ -1372,7 +1235,7 @@ fn main() {
             w.write_all(line.as_bytes()).unwrap();
             w.write_all(b"\n").unwrap();
         }
-        total_written += batch.len();
+        total_written += curr_batch.len();
     }
 
     pb.finish_with_message(format!("Processed {} bubbles", total_bubbles));
