@@ -104,6 +104,8 @@ struct BubbleRecord {
     downstream_nodes: Vec<NodeFeature>,
     nodes: Vec<NodeFeature>,
     edges: Vec<EdgeFeature>,
+    // NEW: strategy A (meta) inside picks
+    inside_nodes: Vec<InsideNodeFeature>,
     paths: Vec<Vec<usize>>,
     label_path: Option<usize>,
     label_reason: Option<String>,
@@ -123,6 +125,22 @@ struct EdgeFeature {
     len_bp: usize,
     cov_min: usize,
     cov_mean: f64,
+}
+
+// -------- Strategy A: topology-aware inside node selection (no labels/ref) --------
+
+#[derive(Serialize, Clone)]
+struct InsideNodeFeature {
+    seq: String,        // k-mer sequence
+    cov: usize,         // KC
+    indeg: usize,
+    outdeg: usize,
+    is_branch: bool,
+    is_articulation: bool, // undirected articulation in induced subgraph
+    dist_start: usize,     // BFS hops from start
+    dist_end: usize,       // BFS hops to end
+    centrality_hint: f64,  // 1/(1+|ds-de|)
+    cov_z: f64,            // z-score in induced
 }
 
 #[inline]
@@ -366,7 +384,6 @@ fn assemble_chain_sequence(
     }
     Some(seq2)
 }
-
 fn append_chain_to_sequence(
     assembled: &mut String,
     chain: &[u128],
@@ -669,7 +686,6 @@ fn minimal_unique_extension(
     None
 }
 
-/// Primary labeler (with deadline checks).
 fn label_with_ref_walk(
     candidate_seqs: &[String],
     start_seq: &str,
@@ -729,8 +745,6 @@ fn label_with_ref_walk(
     }
 }
 
-/// Lenient multi-locus labeling via Aho–Corasick, with deadline.
-/// Returns: (Some(rep_idx), used_flank_bp, sequence_tie, timed_out)
 fn label_with_adaptive_flanks_lenient_ac(
     candidate_seqs: &[String],
     start: u128,
@@ -744,22 +758,20 @@ fn label_with_adaptive_flanks_lenient_ac(
 ) -> (Option<usize>, usize, bool, bool) {
     use std::collections::{HashMap, HashSet};
 
-    // Collapse candidates into RC-equivalence classes.
-    let mut class_map: HashMap<String, (usize, Vec<usize>)> = HashMap::new(); // key -> (rep_idx, members)
+    // RC-class collapse
+    let mut class_map: HashMap<String, (usize, Vec<usize>)> = HashMap::new();
     for (i, s) in candidate_seqs.iter().enumerate() {
         let key = canonical(s);
         class_map.entry(key).and_modify(|(_, v)| v.push(i)).or_insert((i, vec![i]));
     }
-    let classes: Vec<(String, usize, Vec<usize>)> = class_map
-        .into_iter().map(|(k, (rep, mem))| (k, rep, mem)).collect();
+    let classes: Vec<(String, usize, Vec<usize>)> =
+        class_map.into_iter().map(|(k,(rep,mem))| (k,rep,mem)).collect();
 
     if Instant::now() >= deadline { return (None, 0, false, true); }
 
-    // Build flanks once up to a generous cap and try increasing deltas.
     let max_flank_bp = 4_096usize;
     let (indeg, outdeg) = compute_global_deg(succ, pred);
     let (left_full, right_full) = compute_flanks(start, end, succ, pred, &indeg, &outdeg, segments, k, max_flank_bp);
-
     let flanks: &[usize] = &[0, 32, 64, 128, 256, 512, 1024, 2048, 4096];
 
     for d in flanks {
@@ -767,7 +779,6 @@ fn label_with_adaptive_flanks_lenient_ac(
         let left_tail  = if left_full.len()  > *d { &left_full[left_full.len() - *d..] } else { &left_full[..] };
         let right_head = if right_full.len() > *d { &right_full[..*d] } else { &right_full[..] };
 
-        // Build patterns: for each class, forward + reverse pattern (two per class).
         let mut patterns: Vec<String> = Vec::with_capacity(classes.len() * 2);
         for (class_seq, _, _) in classes.iter() {
             patterns.push(format!("{left}{mid}{right}", left = left_tail, mid = class_seq, right = right_head));
@@ -776,40 +787,34 @@ fn label_with_adaptive_flanks_lenient_ac(
 
         if Instant::now() >= deadline { return (None, d * 2, false, true); }
 
-        // Build AC automaton.
         let ac = AhoCorasickBuilder::new()
             .match_kind(MatchKind::LeftmostFirst)
             .build(patterns.iter().map(|s| s.as_str()))
             .expect("Failed to build Aho–Corasick automaton");
 
-        // Count unique sites per class on forward reference only (patterns include RC).
         let mut class_hits: Vec<usize> = vec![0; classes.len()];
-        let mut seen: HashSet<(usize, usize, usize)> = HashSet::new(); // (chrom_ix, start, pat_mod2)
+        let mut seen: HashSet<(usize, usize, usize)> = HashSet::new();
 
         for (cx, chrom) in reftext.chroms.iter().enumerate() {
             if Instant::now() >= deadline { return (None, d * 2, false, true); }
             for m in ac.find_iter(&chrom.seq) {
-                let pid_usize = m.pattern().as_usize(); // PatternID -> usize
-                let class_ix = pid_usize / 2;
-                let dir_mod  = pid_usize % 2;
+                let pid = m.pattern().as_usize();
+                let class_ix = pid / 2;
+                let dir_mod  = pid % 2;
                 let key = (cx, m.start(), dir_mod);
                 if seen.insert(key) {
                     class_hits[class_ix] += 1;
                 }
             }
         }
-
-        // Accept if exactly one sequence class has ≥1 hits.
-        let winners: Vec<usize> = class_hits.iter().enumerate().filter_map(|(i, &h)| (h > 0).then_some(i)).collect();
+        let winners: Vec<usize> = class_hits.iter().enumerate().filter_map(|(i,&h)| (h>0).then_some(i)).collect();
         if winners.len() == 1 {
             let ci = winners[0];
             let rep_idx = classes[ci].1;
-            let topology_tie = classes[ci].2.len() > 1; // multiple candidate paths share the same string
+            let topology_tie = classes[ci].2.len() > 1;
             return (Some(rep_idx), d * 2, topology_tie, false);
         }
-        // else extend flanks and try again
     }
-
     (None, max_flank_bp * 2, false, false)
 }
 
@@ -840,8 +845,227 @@ fn count_bubbles_file(path: &str) -> usize {
     total
 }
 
-/// Build a single JSON line (`BubbleRecord`) with a deadline.
-/// If `timeout` occurs anywhere, returns a record with `label_reason="timeout"`.
+// ---------- Strategy A helpers (unsupervised) ----------
+
+fn induced_degrees(
+    nodes: &HashSet<u128>,
+    succ: &HashMap<u128, Vec<u128>>,
+    pred: &HashMap<u128, Vec<u128>>,
+) -> (HashMap<u128, usize>, HashMap<u128, usize>) {
+    let mut indeg = HashMap::new();
+    let mut outdeg = HashMap::new();
+    for &u in nodes {
+        let o = succ.get(&u).map(|v| v.iter().filter(|x| nodes.contains(x)).count()).unwrap_or(0);
+        let i = pred.get(&u).map(|v| v.iter().filter(|x| nodes.contains(x)).count()).unwrap_or(0);
+        indeg.insert(u, i);
+        outdeg.insert(u, o);
+    }
+    (indeg, outdeg)
+}
+
+fn bfs_distances_from(
+    seeds: &[u128],
+    nodes: &HashSet<u128>,
+    adj: &HashMap<u128, Vec<u128>>,
+) -> HashMap<u128, usize> {
+    let mut dist: HashMap<u128, usize> = HashMap::new();
+    let mut dq = VecDeque::new();
+    for &s in seeds {
+        if nodes.contains(&s) {
+            dist.insert(s, 0);
+            dq.push_back(s);
+        }
+    }
+    while let Some(u) = dq.pop_front() {
+        if let Some(vs) = adj.get(&u) {
+            for &v in vs {
+                if !nodes.contains(&v) { continue; }
+                if dist.contains_key(&v) { continue; }
+                dist.insert(v, dist[&u] + 1);
+                dq.push_back(v);
+            }
+        }
+    }
+    dist
+}
+
+fn articulation_points_undirected(
+    nodes: &HashSet<u128>,
+    succ: &HashMap<u128, Vec<u128>>,
+    pred: &HashMap<u128, Vec<u128>>,
+) -> HashSet<u128> {
+    // build undirected adjacency
+    let mut und: HashMap<u128, Vec<u128>> = HashMap::new();
+    for &u in nodes {
+        und.entry(u).or_default();
+        for &v in succ.get(&u).unwrap_or(&Vec::new()) {
+            if nodes.contains(&v) {
+                und.entry(u).or_default().push(v);
+                und.entry(v).or_default().push(u);
+            }
+        }
+        for &p in pred.get(&u).unwrap_or(&Vec::new()) {
+            if nodes.contains(&p) {
+                und.entry(u).or_default().push(p);
+                und.entry(p).or_default().push(u);
+            }
+        }
+    }
+    let mut time = 0usize;
+    let mut disc: HashMap<u128, usize> = HashMap::new();
+    let mut low: HashMap<u128, usize> = HashMap::new();
+    let mut parent: HashMap<u128, Option<u128>> = HashMap::new();
+    let mut ap: HashSet<u128> = HashSet::new();
+
+    fn dfs(
+        u: u128,
+        und: &HashMap<u128, Vec<u128>>,
+        time: &mut usize,
+        disc: &mut HashMap<u128, usize>,
+        low: &mut HashMap<u128, usize>,
+        parent: &mut HashMap<u128, Option<u128>>,
+        ap: &mut HashSet<u128>,
+    ) {
+        *time += 1;
+        let t = *time;
+        disc.insert(u, t);
+        low.insert(u, t);
+        let mut children = 0usize;
+
+        if let Some(nei) = und.get(&u) {
+            for &v in nei {
+                if !disc.contains_key(&v) {
+                    children += 1;
+                    parent.insert(v, Some(u));
+                    dfs(v, und, time, disc, low, parent, ap);
+                    let low_u = *low.get(&u).unwrap();
+                    let low_v = *low.get(&v).unwrap();
+                    low.insert(u, low_u.min(low_v));
+                    let p = parent.get(&u).copied().flatten();
+                    if p.is_none() && children > 1 { ap.insert(u); }
+                    if p.is_some() && low_v >= *disc.get(&u).unwrap() { ap.insert(u); }
+                } else if Some(v) != parent.get(&u).copied().flatten() {
+                    let low_u = *low.get(&u).unwrap();
+                    let disc_v = *disc.get(&v).unwrap();
+                    low.insert(u, low_u.min(disc_v));
+                }
+            }
+        }
+    }
+
+    for &u in und.keys() {
+        if !disc.contains_key(&u) {
+            parent.insert(u, None);
+            dfs(u, &und, &mut time, &mut disc, &mut low, &mut parent, &mut ap);
+        }
+    }
+    ap
+}
+
+fn mean_std(vals: &[f64]) -> (f64, f64) {
+    if vals.is_empty() { return (0.0, 1.0); }
+    let m = vals.iter().sum::<f64>() / vals.len() as f64;
+    let v = vals.iter().map(|x| (x - m) * (x - m)).sum::<f64>() / vals.len() as f64;
+    (m, v.sqrt().max(1e-9))
+}
+
+fn select_inside_nodes_meta(
+    start: u128,
+    end: u128,
+    original_inside: &HashSet<u128>,
+    induced_nodes: &HashSet<u128>,
+    succ: &HashMap<u128, Vec<u128>>,
+    pred: &HashMap<u128, Vec<u128>>,
+    segments: &HashMap<u128, Segment>,
+    top_k: usize,
+) -> Vec<InsideNodeFeature> {
+    let mut cand: Vec<u128> = original_inside
+        .iter().copied()
+        .filter(|&u| induced_nodes.contains(&u) && u != start && u != end)
+        .collect();
+    if cand.is_empty() { return Vec::new(); }
+
+    let (indeg, outdeg) = induced_degrees(induced_nodes, succ, pred);
+    let ds = bfs_distances_from(&[start], induced_nodes, succ);
+    let de = bfs_distances_from(&[end], induced_nodes, pred);
+    let aps = articulation_points_undirected(induced_nodes, succ, pred);
+
+    let covs: Vec<f64> = induced_nodes
+        .iter()
+        .map(|u| segments.get(u).map(|s| s.cov as f64).unwrap_or(0.0))
+        .collect();
+    let (cov_mu, cov_sigma) = mean_std(&covs);
+
+    #[derive(Clone)]
+    struct Row { u: u128, score: f64, feat: InsideNodeFeature }
+
+    let mut rows: Vec<Row> = Vec::with_capacity(cand.len());
+    for u in cand.drain(..) {
+        let cov = segments.get(&u).map(|s| s.cov).unwrap_or(0);
+        let indeg_u = *indeg.get(&u).unwrap_or(&0);
+        let outdeg_u = *outdeg.get(&u).unwrap_or(&0);
+        let is_branch = indeg_u > 1 || outdeg_u > 1;
+        let is_ap = aps.contains(&u);
+
+        let d_s = *ds.get(&u).unwrap_or(&usize::MAX);
+        let d_e = *de.get(&u).unwrap_or(&usize::MAX);
+        let centrality_hint = if d_s == usize::MAX || d_e == usize::MAX {
+            0.0
+        } else {
+            1.0 / (1.0 + ((d_s as isize - d_e as isize).abs() as f64))
+        };
+
+        let cov_z = if cov_sigma > 0.0 { (cov as f64 - cov_mu) / cov_sigma } else { 0.0 };
+        let cov_contrast = cov_z.abs();
+
+        let score =
+            2.5 * (is_branch as i32 as f64) +
+            2.0 * (is_ap as i32 as f64) +
+            1.2 * centrality_hint +
+            0.8 * cov_contrast;
+
+        let seq = segments.get(&u).map(|s| s.seq.clone()).unwrap_or_default();
+
+        rows.push(Row {
+            u,
+            score,
+            feat: InsideNodeFeature {
+                seq,
+                cov,
+                indeg: indeg_u,
+                outdeg: outdeg_u,
+                is_branch,
+                is_articulation: is_ap,
+                dist_start: if d_s == usize::MAX { 0 } else { d_s },
+                dist_end:   if d_e == usize::MAX { 0 } else { d_e },
+                centrality_hint,
+                cov_z,
+            }
+        });
+    }
+
+    rows.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score).unwrap()
+            .then_with(|| (b.feat.indeg + b.feat.outdeg).cmp(&(a.feat.indeg + a.feat.outdeg)))
+            .then_with(|| b.feat.cov.cmp(&a.feat.cov))
+            .then_with(|| a.u.cmp(&b.u))
+    });
+
+    let mut out: Vec<InsideNodeFeature> = Vec::new();
+    let mut per_seq: HashMap<String, usize> = HashMap::new();
+    for r in rows {
+        if out.len() >= top_k { break; }
+        let c = per_seq.entry(r.feat.seq.clone()).or_insert(0);
+        if *c >= 2 { continue; }
+        *c += 1;
+        out.push(r.feat);
+    }
+    out
+}
+
+// -------------- build_record_json with Strategy A inside nodes --------------
+
 fn build_record_json(
     bubble: &Bubble,
     k: usize,
@@ -859,7 +1083,6 @@ fn build_record_json(
     let start: u128 = parse_u128(&bubble.ends[0]);
     let end: u128   = parse_u128(&bubble.ends[1]);
 
-    // Induced subgraph nodes (bubble + context)
     let inside: HashSet<u128> = bubble.inside.iter().map(|s| parse_u128(s)).collect();
     let nodes: HashSet<u128> =
         collect_nodes_for_bubble_context(&inside, start, end, succ, pred, radius_context);
@@ -871,29 +1094,30 @@ fn build_record_json(
             end_seq: segments.get(&end).map(|s| s.seq.clone()).unwrap_or_default(),
             upstream: vec![], downstream: vec![],
             upstream_nodes: vec![], downstream_nodes: vec![],
-            nodes: vec![], edges: vec![], paths: vec![],
+            nodes: vec![], edges: vec![], inside_nodes: vec![], paths: vec![],
             label_path: None, label_reason: Some("timeout".into()),
         }).unwrap());
     }
 
-    // Compact (with EC fallback to KC) and split endpoints
     let (superedges0, supernodes0) = compact_with_chains(&nodes, succ, pred, edge_cov, segments);
     let mut superedges = split_edges_at(start, &superedges0);
     superedges = split_edges_at(end, &superedges);
 
-    // Enumerate paths + sequences (bidirectional)
     let (paths_vec, seqs_vec, _reversed, to_enum) =
         enumerate_paths_bidir(start, end, &superedges, segments, k, max_paths, deadline);
 
-    // ------- Preset flanks to export: greedily take exactly N neighbors if available -------
     let upstream_ids: Vec<u128> = collect_flanks_greedy(
-        start, /*forward=*/false, succ, pred, segments, edge_cov, flank_kmers
+        start, false, succ, pred, segments, edge_cov, flank_kmers
     );
     let downstream_ids: Vec<u128> = collect_flanks_greedy(
-        end, /*forward=*/true, succ, pred, segments, edge_cov, flank_kmers
+        end, true, succ, pred, segments, edge_cov, flank_kmers
     );
 
-    // Start building record
+    let top_inside_k: usize = 16;
+    let inside_nodes = select_inside_nodes_meta(
+        start, end, &inside, &nodes, succ, pred, segments, top_inside_k
+    );
+
     let mut rec = BubbleRecord {
         bubble_id: bubble.id,
         k,
@@ -911,6 +1135,7 @@ fn build_record_json(
             .map(|s| NodeFeature { seq: s.seq.clone(), cov: s.cov }).collect(),
         nodes: Vec::new(),
         edges: Vec::new(),
+        inside_nodes,
         paths: paths_vec.clone(),
         label_path: None,
         label_reason: None,
@@ -921,20 +1146,14 @@ fn build_record_json(
             rec.nodes.push(NodeFeature { seq: seg.seq.clone(), cov: seg.cov });
         }
     }
-
     for e in superedges.iter() {
         let len_nodes = e.chain.len();
         let len_bp = k + len_nodes.saturating_sub(1);
         let source_seq = segments.get(&e.from).map(|s| s.seq.clone()).unwrap_or_default();
         let target_seq = segments.get(&e.to).map(|s| s.seq.clone()).unwrap_or_default();
-
         rec.edges.push(EdgeFeature {
-            source_seq,
-            target_seq,
-            len_nodes,
-            len_bp,
-            cov_min: e.cov_min,
-            cov_mean: e.cov_mean,
+            source_seq, target_seq, len_nodes, len_bp,
+            cov_min: e.cov_min, cov_mean: e.cov_mean,
         });
     }
 
@@ -944,16 +1163,10 @@ fn build_record_json(
         return Some(serde_json::to_string(&rec).unwrap());
     }
 
-    // --- Labeling cascade ---
     if !seqs_vec.is_empty() {
         let (lab1, why1) = label_with_ref_walk(
-            &seqs_vec,
-            &segments[&start].seq,
-            &segments[&end].seq,
-            reftext,
-            k,
-            /*try_mue=*/true,
-            deadline,
+            &seqs_vec, &segments[&start].seq, &segments[&end].seq,
+            reftext, k, true, deadline,
         );
         if why1 == "timeout" {
             rec.label_reason = Some("timeout".into());
@@ -972,12 +1185,10 @@ fn build_record_json(
                 rec.label_path = lab2;
                 rec.label_reason = Some("adaptive_kmp".into());
             } else if lab2.is_some() && seq_tie {
-                // Sequence consensus achieved but multiple path indices share that string.
-                // Safety: do not set label_path.
                 rec.label_path = None;
                 rec.label_reason = Some("adaptive_kmp_sequence_tie".into());
             } else {
-                rec.label_reason = Some(why1); // "no_ref_match" or "ambiguous_ref_multi_hit"
+                rec.label_reason = Some(why1);
             }
         }
     } else {
@@ -986,7 +1197,6 @@ fn build_record_json(
 
     Some(serde_json::to_string(&rec).unwrap())
 }
-
 fn collect_flanks_greedy(
     seed: u128,
     forward: bool,
