@@ -1,52 +1,21 @@
 //! DNA contig assembler module.
 //!
-//! Provides functionality for assembling contigs from a de Bruijn graph
-//! constructed from k-mers. This module defines the `Assembler` struct,
-//! which identifies maximal non-branching paths in the graph and reconstructs
-//! contiguous DNA sequences from them.
-//!
-//! # Overview
-//!
-//! The assembler starts contig construction at nodes with in-degree or out-degree
-//! not equal to 1, and extends paths through 1-in-1-out nodes until a branch or
-//! dead-end is encountered. The resulting sequences represent assembled contigs.
-//!
-//! # Dependencies
-//!
-//! - `KmerGraph`: structure representing the de Bruijn graph.
-//! - `HashSet`: used to track visited edges and prevent revisiting paths.
+//! Exports maximal unitigs (including pure 1-in-1-out cycles). The previous
+//! assemble_contigs() is preserved as dead code and not called.
 
 use crate::kmer_graph::KmerGraph;
 use std::collections::HashSet;
 
-
-/// Struct representing a contig assembler using a de Bruijn graph.
-///
-/// Holds a reference to a precomputed k-mer graph and provides methods to generate contigs.
 pub struct Assembler<'g> {
-    /// Reference to a KmerGraph used for assembly.
     pub graph: &'g KmerGraph,
 }
 
 impl<'g> Assembler<'g> {
-    /// Constructs a new assembler from a given `KmerGraph`.
-    ///
-    /// # Arguments
-    /// * `graph` - Reference to the graph from which contigs will be assembled.
-    ///
-    /// # Returns
-    /// A new instance of `Assembler`.
     pub fn new(graph: &'g KmerGraph) -> Self {
         Self { graph }
     }
 
-    /// Assembles contigs from the k-mer graph by walking maximal non-branching paths.
-    ///
-    /// A contig is formed by starting at nodes that are not 1-in-1-out and
-    /// walking through nodes with in-degree = 1 and out-degree = 1 until a branch or end is reached.
-    ///
-    /// # Returns
-    /// A vector of contigs, each represented as a `String` DNA sequence.
+    // --- OLD METHOD (dead code; not called) ---------------------------------
     pub fn assemble_contigs(&self) -> Vec<String> {
         let mut contigs = Vec::new();
         let mut visited = HashSet::new();
@@ -55,36 +24,174 @@ impl<'g> Assembler<'g> {
             let indeg = *self.graph.in_degree.get(&u).unwrap_or(&0);
             let outdeg = *self.graph.out_degree.get(&u).unwrap_or(&0);
 
-            // Start contig if node is a branch point or an end
             if indeg != 1 || outdeg != 1 {
                 for &v in succs {
                     if !visited.insert((u, v)) {
                         continue;
                     }
 
-                    // Walk forward while node is 1-in-1-out
                     let mut path = vec![u, v];
                     let mut curr = v;
-                    while self.graph.in_degree[&curr] == 1
-                        && self.graph.out_degree[&curr] == 1
-                    {
-                        let &nxt = self.graph.edges[&curr].iter().next().unwrap();
-                        visited.insert((curr, nxt));
-                        curr = nxt;
-                        path.push(curr);
+
+                    // SAFE access
+                    while self.deg_in(curr) == 1 && self.deg_out(curr) == 1 {
+                        if let Some(nxt) = self.first_succ(curr) {
+                            if !visited.insert((curr, nxt)) {
+                                break;
+                            }
+                            curr = nxt;
+                            path.push(curr);
+                        } else {
+                            break;
+                        }
                     }
 
-                    // Reconstruct sequence from path of k-mers
-                    let mut seq = self.graph.decode(path[0]);
-                    for &code in &path[1..] {
-                        let kmer = self.graph.decode(code);
-                        seq.push_str(&kmer[kmer.len() - 1..]);
+                    contigs.push(self.reconstruct(&path, false));
+                }
+            }
+        }
+        contigs
+    }
+
+    // --- NEW METHOD (unitigs incl. cycles) ----------------------------------
+    pub fn assemble_unitigs(&self) -> Vec<String> {
+        let mut unitigs = Vec::new();
+        let mut visited: HashSet<(u128, u128)> = HashSet::new();
+
+        // Step 1: start at branch/end nodes
+        for (&u, succs) in &self.graph.edges {
+            let indeg = self.deg_in(u);
+            let outdeg = self.deg_out(u);
+
+            if indeg != 1 || outdeg != 1 {
+                for &v in succs {
+                    if !visited.insert((u, v)) {
+                        continue;
                     }
-                    contigs.push(seq);
+
+                    let mut path = vec![u, v];
+                    let mut curr = v;
+
+                    while self.deg_in(curr) == 1 && self.deg_out(curr) == 1 {
+                        if let Some(nxt) = self.first_succ(curr) {
+                            if !visited.insert((curr, nxt)) {
+                                break;
+                            }
+                            curr = nxt;
+                            path.push(curr);
+                        } else {
+                            // out_degree said 1 but adjacency missing; stop gracefully
+                            break;
+                        }
+                    }
+
+                    unitigs.push(self.reconstruct(&path, false));
                 }
             }
         }
 
-        contigs
+        // Step 2: handle pure 1-in-1-out cycles
+        for (&u, succs) in &self.graph.edges {
+            if self.deg_in(u) != 1 || self.deg_out(u) != 1 {
+                continue;
+            }
+
+            for &v in succs {
+                if visited.contains(&(u, v)) {
+                    continue;
+                }
+
+                // Walk cycle starting from edge (u, v)
+                let mut path = vec![u, v];
+                visited.insert((u, v));
+                let mut curr = v;
+
+                loop {
+                    // Leave if not 1-in-1-out (should be rare after step 1 handled branches)
+                    if self.deg_in(curr) != 1 || self.deg_out(curr) != 1 {
+                        // Extend linearly until a branch/end; emit as linear path
+                        while self.deg_in(curr) == 1 && self.deg_out(curr) == 1 {
+                            if let Some(nxt) = self.first_succ(curr) {
+                                if !visited.insert((curr, nxt)) {
+                                    break;
+                                }
+                                curr = nxt;
+                                path.push(curr);
+                            } else {
+                                break;
+                            }
+                        }
+                        unitigs.push(self.reconstruct(&path, false));
+                        break;
+                    }
+
+                    let Some(nxt) = self.first_succ(curr) else {
+                        // Inconsistent maps; emit what we have
+                        unitigs.push(self.reconstruct(&path, false));
+                        break;
+                    };
+
+                    // If we are about to traverse the starting edge again, the cycle is closed.
+                    if curr == u && nxt == v {
+                        // Push start once to mark closure for reconstruction logic
+                        path.push(u);
+                        unitigs.push(self.reconstruct(&path, true));
+                        break;
+                    }
+
+                    if !visited.insert((curr, nxt)) {
+                        // Another walk already covered the remainder; nothing to emit
+                        break;
+                    }
+
+                    curr = nxt;
+                    path.push(curr);
+                }
+            }
+        }
+
+        unitigs
+    }
+
+    // --- Helpers -------------------------------------------------------------
+
+    #[inline]
+    fn deg_in(&self, u: u128) -> usize {
+        *self.graph.in_degree.get(&u).unwrap_or(&0)
+    }
+
+    #[inline]
+    fn deg_out(&self, u: u128) -> usize {
+        *self.graph.out_degree.get(&u).unwrap_or(&0)
+    }
+
+    #[inline]
+    fn first_succ(&self, u: u128) -> Option<u128> {
+        self.graph
+            .edges
+            .get(&u)
+            .and_then(|s| s.iter().next().copied())
+    }
+
+    /// Reconstruct sequence from a path of node codes.
+    /// For cycles, `path` ends with the start node duplicated once; we avoid
+    /// duplicating the last base from the duplicated node.
+    fn reconstruct(&self, path: &[u128], is_cycle: bool) -> String {
+        if path.is_empty() {
+            return String::new();
+        }
+        let mut seq = self.graph.decode(path[0]);
+        let end = if is_cycle {
+            // Last entry equals the first; skip it when appending bases
+            path.len() - 1
+        } else {
+            path.len()
+        };
+        for &code in &path[1..end] {
+            let kmer = self.graph.decode(code);
+            // append last base
+            seq.push_str(&kmer[kmer.len() - 1..]);
+        }
+        seq
     }
 }

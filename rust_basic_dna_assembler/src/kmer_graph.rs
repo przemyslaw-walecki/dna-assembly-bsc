@@ -1,6 +1,6 @@
 use fxhash::FxHashMap as HashMap;
 use fxhash::FxHashSet as HashSet;
-use std::collections::{HashSet as StdHashSet, VecDeque};
+use std::collections::{HashSet as StdHashSet};
 use std::fs::File;
 use std::io::{BufWriter, Write};
 

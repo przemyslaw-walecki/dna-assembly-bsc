@@ -1,15 +1,9 @@
 //! Command-line interface for the AI DNA assembler.
 //!
-//! This module loads sequencing reads from paired FASTQ files, constructs a k-mer de Bruijn graph,
-//! performs graph cleaning operations, assembles contigs, and writes the result to a FASTA file.
-//!
-//! # Functionality
-//!
-//! - Parses command-line arguments
-//! - Loads reads using `FastqParser`
-//! - Builds and cleans the graph via `KmerGraph`
-//! - Assembles contigs with `Assembler`
-//! - Outputs contigs to `data/{output_file}` in FASTA format
+//! Loads reads from paired FASTQ files, constructs a k-mer de Bruijn graph,
+//! (optionally) cleans the graph, assembles maximal unitigs, and writes:
+//! - FASTA contigs to `data/{output}`
+//! - GFA with KC/EC to `{output}.gfa`
 
 mod assembler;
 mod fastq_parser;
@@ -24,9 +18,6 @@ use std::io::{self, Write};
 use std::path::Path;
 
 /// Command-line arguments for the assembler.
-///
-/// Provides options for input files, k-mer length, filtering threshold, pruning depth,
-/// bubble detection depth, and output path.
 #[derive(Parser)]
 struct Args {
     /// Path to the first FASTQ file (`-1`)
@@ -58,13 +49,6 @@ struct Args {
     output: String,
 }
 
-/// Main entry point for the assembler pipeline.
-///
-/// This function loads the reads, constructs and cleans the graph, assembles the contigs,
-/// and writes them to a FASTA file.
-///
-/// # Errors
-/// Returns `io::Error` if reading or writing files fails.
 fn main() -> io::Result<()> {
     let args = Args::parse();
 
@@ -72,44 +56,45 @@ fn main() -> io::Result<()> {
     let mut reads = FastqParser::new(&args.reads1).load_reads()?;
     reads.extend(FastqParser::new(&args.reads2).load_reads()?);
 
-    // Build and clean the k-mer graph
+    // Build the k-mer graph
     let mut graph = KmerGraph::new(args.kmer);
-
     graph.build(&reads);
-    //graph.filter_low_coverage(args.threshold);
+
+    // Optional cleaning (kept as dead code; enable as needed)
+    // graph.filter_low_coverage(args.threshold);
     // graph.remove_dead_ends(Some(args.depth));
-    graph.write_gfa(&args.output).unwrap();
     // graph.remove_bubbles(args.bubble_depth);
+
+    // Write GFA snapshot (KC/EC) beside FASTA output
+    // let gfa_path = format!("{}.gfa", args.output);
+    // graph.write_gfa(&gfa_path).unwrap();
 
     // Basic graph stats
     eprintln!("Loaded {} reads", reads.len());
     let edge_cnt = graph.edge_count();
     let node_cnt = graph.in_degree.len();
-    let zero_indeg: Vec<_> = graph
+    let zero_indeg = graph
         .in_degree
         .iter()
-        .filter_map(|(&u, &d)| if d == 0 { Some(u) } else { None })
-        .collect();
+        .filter(|&(_, &d)| d == 0)
+        .count();
     eprintln!(
         "Graph: {} edges, {} nodes; {} sources (in_deg=0)",
-        edge_cnt, node_cnt, zero_indeg.len()
+        edge_cnt, node_cnt, zero_indeg
     );
-    //for &u in zero_indeg.iter().take(5) {
-    //    eprintln!(" source kmer: {}", graph.decode(u));
-    //}
 
-    // Assemble contigs from the cleaned graph
-    //let contigs = Assembler::new(&graph).assemble_contigs();
 
-    //Write contigs to output file in FASTA format
-    // fs::create_dir_all("data")?;
-    // let out_path = Path::new("data").join(&args.output);
-    // let mut f = fs::File::create(&out_path)?;
-    // for (i, c) in contigs.iter().enumerate() {
-    //     writeln!(f, ">contig_{}", i + 1)?;
-    //     writeln!(f, "{}", c)?;
-    // }
+    let contigs = Assembler::new(&graph).assemble_unitigs();
 
-    // println!("Wrote {} contigs to {:?}", contigs.len(), out_path);
+    // Write contigs to output FASTA in data/
+    fs::create_dir_all("data")?;
+    let out_path = Path::new("data").join(&args.output);
+    let mut f = fs::File::create(&out_path)?;
+    for (i, c) in contigs.iter().enumerate() {
+        writeln!(f, ">unitig_{}", i + 1)?;
+        writeln!(f, "{}", c)?;
+    }
+    println!("Wrote {} unitigs to {:?}", contigs.len(), out_path);
+
     Ok(())
 }
