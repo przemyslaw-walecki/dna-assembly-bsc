@@ -5,17 +5,17 @@
 //! - FASTA contigs to `data/{output}`
 //! - GFA with KC/EC to `{output}.gfa`
 
-mod assembler;
-mod fastq_parser;
-mod kmer_graph;
+use indicatif::{ProgressBar, ProgressStyle};
+use rayon::prelude::*;
+use serde::{Deserialize, Serialize};
+use serde_json::{Deserializer, Value};
+use std::cmp;
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::env;
+use std::fs::File;
+use std::io::{BufRead, BufReader, BufWriter, Write};
 
-use assembler::Assembler;
-use clap::Parser;
-use fastq_parser::FastqParser;
-use kmer_graph::KmerGraph;
-use std::fs;
-use std::io::{self, Write};
-use std::path::Path;
+// ---------- Data models ----------
 
 /// Command-line arguments for the assembler.
 #[derive(Parser)]
@@ -51,10 +51,24 @@ struct Args {
 
 fn main() -> io::Result<()> {
     let args = Args::parse();
+#[derive(Debug)]
+struct Segment {
+    id: u128,
+    seq: String,
+    cov: usize, // KC
+}
 
-    // Load reads from both FASTQ files
-    let mut reads = FastqParser::new(&args.reads1).load_reads()?;
-    reads.extend(FastqParser::new(&args.reads2).load_reads()?);
+#[derive(Debug, Clone)]
+struct Link {
+    from: u128,
+    to: u128,
+    cov: usize, // EC
+}
+
+#[derive(Deserialize)]
+struct BubbleChain {
+    bubbles: Vec<Bubble>,
+}
 
     // Build the k-mer graph
     let mut graph = KmerGraph::new(args.kmer);

@@ -12,8 +12,8 @@ pub struct KmerGraph {
     pub out_degree: HashMap<u128, usize>,
     /// (k+1)-mer counts (edge coverage)
     pub edge_counts: HashMap<(u128, u128), usize>,
-    /// k-mer counts (node coverage)
-    pub node_counts: HashMap<u128, usize>,
+    /// Coverage for each node.
+    pub node_coverage: HashMap<u128, usize>,
 }
 
 impl KmerGraph {
@@ -24,7 +24,7 @@ impl KmerGraph {
             in_degree: HashMap::default(),
             out_degree: HashMap::default(),
             edge_counts: HashMap::default(),
-            node_counts: HashMap::default(),
+            node_coverage: HashMap::default(),
         }
     }
 
@@ -57,7 +57,7 @@ impl KmerGraph {
             // count k-mers (node coverage)
             for i in 0..=r.len() - self.k {
                 let u = self.encode(&r[i..i + self.k]);
-                *self.node_counts.entry(u).or_default() += 1;
+                *self.node_coverage.entry(u).or_default() += 1;
             }
 
             // add edges and count (k+1)-mers (edge coverage)
@@ -91,8 +91,7 @@ impl KmerGraph {
         }
     }
 
-    // ... (dead-end trimming / bubbles unchanged) ...
-
+    /// Returns the number of edges in the graph.
     pub fn edge_count(&self) -> usize {
         self.edges.values().map(|s| s.len()).sum()
     }
@@ -102,7 +101,7 @@ impl KmerGraph {
         let all_nodes: StdHashSet<u128> = self.edges.keys()
             .chain(self.in_degree.keys())
             .chain(self.out_degree.keys())
-            .chain(self.node_counts.keys())   // <- include k-mer count nodes
+            .chain(self.node_coverage.keys())   // <- include k-mer count nodes
             .copied()
             .collect();
 
@@ -110,7 +109,7 @@ impl KmerGraph {
             self.edges.entry(n).or_default();
             self.in_degree.entry(n).or_default();
             self.out_degree.entry(n).or_default();
-            self.node_counts.entry(n).or_default();
+            self.node_coverage.entry(n).or_default();
         }
     }
 
@@ -129,7 +128,7 @@ impl KmerGraph {
         }
         for &n in self.in_degree.keys() { all_nodes.insert(n); }
         for &n in self.out_degree.keys() { all_nodes.insert(n); }
-        for &n in self.node_counts.keys() { all_nodes.insert(n); }
+        for &n in self.node_coverage.keys() { all_nodes.insert(n); }
 
         let mut nodes: Vec<_> = all_nodes.into_iter().collect();
         nodes.sort_unstable();
@@ -137,7 +136,7 @@ impl KmerGraph {
         // S-lines with KC:i
         for &n in &nodes {
             let seq = self.decode(n);
-            let kc = self.node_counts.get(&n).copied().unwrap_or(0);
+            let kc = self.node_coverage.get(&n).copied().unwrap_or(0);
             writeln!(w, "S\t{}\t{}\tKC:i:{}", n, seq, kc)?;
         }
 
