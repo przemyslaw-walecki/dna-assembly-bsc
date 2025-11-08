@@ -1,22 +1,46 @@
+//! K-mer de Bruijn graph construction and simplification module.
+//!
+//! This module defines the `KmerGraph` struct, which represents a directed de Bruijn graph
+//! built from DNA sequencing reads. It supports graph construction, coverage-aware filtering,
+//! dead-end pruning, bubble removal, and exporting a GFA snapshot with per-node (KC) and
+//! per-edge (EC) coverages.
+//!
+//! # Overview
+//!
+//! - k-mers are encoded as `u128` integers
+//! - nodes represent k-mers; edges represent (k+1)-mers
+//! - maintains `edge_counts` (EC) and `node_coverage` (KC)
+//! - includes cleaning: low-coverage edge removal, tip trimming, bubble removal
+//!
+//! # Dependencies
+//!
+//! - Uses `fxhash` for fast hashing
+//! - `VecDeque` for BFS during bubble detection
+
 use fxhash::FxHashMap as HashMap;
 use fxhash::FxHashSet as HashSet;
-use std::collections::{HashSet as StdHashSet};
+use std::collections::{HashSet as StdHashSet, VecDeque};
 use std::fs::File;
 use std::io::{BufWriter, Write};
 
 /// Directed de Bruijn graph for k-mers.
 pub struct KmerGraph {
+    /// Length of k-mers used in the graph.
     pub k: usize,
+    /// Adjacency list: maps each node to a set of successor nodes.
     pub edges: HashMap<u128, HashSet<u128>>,
+    /// Maps node to in-degree count.
     pub in_degree: HashMap<u128, usize>,
+    /// Maps node to out-degree count.
     pub out_degree: HashMap<u128, usize>,
-    /// (k+1)-mer counts (edge coverage)
+    /// (k+1)-mer counts (edge coverage, EC).
     pub edge_counts: HashMap<(u128, u128), usize>,
-    /// Coverage for each node.
+    /// k-mer counts (node coverage, KC).
     pub node_coverage: HashMap<u128, usize>,
 }
 
 impl KmerGraph {
+    /// Creates a new, empty `KmerGraph` with the given k-mer length.
     pub fn new(k: usize) -> Self {
         Self {
             k,
@@ -28,11 +52,18 @@ impl KmerGraph {
         }
     }
 
+    /// Encodes a DNA k-mer string (e.g., `"ACG"`) into a compact `u128` integer.
+    ///
+    /// # Panics
+    /// If the string contains invalid bases.
     pub fn encode(&self, s: &str) -> u128 {
         let mut c: u128 = 0;
         for b in s.bytes() {
             let v = match b {
-                b'A' => 0, b'C' => 1, b'G' => 2, b'T' => 3,
+                b'A' => 0,
+                b'C' => 1,
+                b'G' => 2,
+                b'T' => 3,
                 _ => panic!("Invalid base {}", b as char),
             };
             c = (c << 2) | v;
@@ -40,27 +71,37 @@ impl KmerGraph {
         c
     }
 
+    /// Decodes a `u128` integer into a DNA k-mer string (e.g., `"ACG"`).
     pub fn decode(&self, mut code: u128) -> String {
         let mut buf = vec!['A'; self.k];
         for i in (0..self.k).rev() {
-            buf[i] = match code & 3 { 0 => 'A', 1 => 'C', 2 => 'G', _ => 'T' };
+            buf[i] = match code & 3 {
+                0 => 'A',
+                1 => 'C',
+                2 => 'G',
+                _ => 'T',
+            };
             code >>= 2;
         }
         buf.into_iter().collect()
     }
 
-    /// Build graph and count both k-mers (KC) and (k+1)-mers (EC)
+    /// Builds the de Bruijn graph and counts both k-mers (KC) and (k+1)-mers (EC).
+    ///
+    /// - Updates adjacency, in/out degrees, `edge_counts`, and `node_coverage`.
     pub fn build(&mut self, reads: &[String]) {
         for r in reads {
-            if r.len() < self.k { continue; }
+            if r.len() < self.k {
+                continue;
+            }
 
-            // count k-mers (node coverage)
+            // Count k-mers (node coverage: KC)
             for i in 0..=r.len() - self.k {
                 let u = self.encode(&r[i..i + self.k]);
                 *self.node_coverage.entry(u).or_default() += 1;
             }
 
-            // add edges and count (k+1)-mers (edge coverage)
+            // Add edges and count (k+1)-mers (edge coverage: EC)
             if r.len() >= self.k + 1 {
                 for i in 0..=r.len() - self.k - 1 {
                     let u = self.encode(&r[i..i + self.k]);
@@ -74,12 +115,16 @@ impl KmerGraph {
                 }
             }
         }
+        self.normalize_nodes();
     }
 
+    /// Removes edges with coverage below the given threshold.
     pub fn filter_low_coverage(&mut self, threshold: usize) {
         let mut to_remove = Vec::new();
         for (&(u, v), &cnt) in &self.edge_counts {
-            if cnt < threshold { to_remove.push((u, v)); }
+            if cnt < threshold {
+                to_remove.push((u, v));
+            }
         }
         for (u, v) in to_remove {
             if let Some(succs) = self.edges.get_mut(&u) {
@@ -88,7 +133,171 @@ impl KmerGraph {
                     *self.in_degree.get_mut(&v).unwrap() -= 1;
                 }
             }
+            // keep counts map as-is or drop it; here we drop for consistency
+            self.edge_counts.remove(&(u, v));
         }
+    }
+
+    /// Removes short dead-end branches (tips) up to a specified depth.
+    ///
+    /// # Arguments
+    /// * `max_depth` - maximum chain length to remove (defaults to `k` if `None`)
+    pub fn remove_dead_ends(&mut self, max_depth: Option<usize>) {
+        let max_depth = max_depth.unwrap_or(self.k);
+
+        for depth in 1..=max_depth {
+            // Build predecessors map
+            let mut pred: HashMap<u128, HashSet<u128>> = HashMap::default();
+            for (&u, succs) in &self.edges {
+                for &v in succs {
+                    pred.entry(v).or_default().insert(u);
+                }
+            }
+
+            // Tips: nodes with out-degree 0
+            let tips: Vec<u128> = self
+                .out_degree
+                .iter()
+                .filter_map(|(&n, &od)| if od == 0 { Some(n) } else { None })
+                .collect();
+
+            let mut to_remove = HashSet::default();
+            for tip in tips {
+                let mut chain = vec![tip];
+                let mut curr = tip;
+
+                for _ in 0..depth {
+                    let preds = pred
+                        .get(&curr)
+                        .unwrap_or(&HashSet::default())
+                        .iter()
+                        .filter(|&&p| {
+                            self.in_degree.get(&p).copied().unwrap_or(0) == 1
+                                && self.out_degree.get(&p).copied().unwrap_or(0) == 1
+                        })
+                        .copied()
+                        .collect::<Vec<u128>>();
+
+                    if preds.len() != 1 {
+                        break;
+                    }
+                    curr = preds[0];
+                    chain.push(curr);
+                }
+
+                if chain.len() - 1 <= depth {
+                    to_remove.extend(chain);
+                }
+            }
+
+            if to_remove.is_empty() {
+                break;
+            }
+
+            // Delete nodes/edges in the tip chains
+            for &n in &to_remove {
+                if let Some(succs) = self.edges.remove(&n) {
+                    for v in succs {
+                        *self.in_degree.get_mut(&v).unwrap() -= 1;
+                        self.edge_counts.remove(&(n, v));
+                    }
+                }
+                if let Some(parents) = pred.get(&n) {
+                    for &p in parents {
+                        if let Some(succs) = self.edges.get_mut(&p) {
+                            if succs.remove(&n) {
+                                *self.out_degree.get_mut(&p).unwrap() -= 1;
+                                self.edge_counts.remove(&(p, n));
+                            }
+                        }
+                    }
+                }
+                self.in_degree.remove(&n);
+                self.out_degree.remove(&n);
+                self.node_coverage.remove(&n);
+            }
+        }
+
+        self.normalize_nodes();
+    }
+
+    /// Removes bubbles (redundant alternative paths) up to `max_depth`.
+    ///
+    /// # Arguments
+    /// * `max_depth` - maximum path length to explore when detecting bubbles.
+    pub fn remove_bubbles(&mut self, max_depth: usize) {
+        // Build predecessors map
+        let mut pred: HashMap<u128, HashSet<u128>> = HashMap::default();
+        for (&u, succs) in &self.edges {
+            for &v in succs {
+                pred.entry(v).or_default().insert(u);
+            }
+        }
+
+        let mut to_drop: HashSet<u128> = HashSet::default();
+        let mut seen_pairs: HashSet<(Vec<u128>, Vec<u128>)> = HashSet::default();
+
+        for (&src, succs) in &self.edges {
+            if succs.len() < 2 {
+                continue;
+            }
+            let mut seen: HashMap<u128, Vec<u128>> = HashMap::default();
+            let mut q: VecDeque<Vec<u128>> = VecDeque::new();
+            q.push_back(vec![src]);
+
+            while let Some(path) = q.pop_front() {
+                if path.len() > max_depth {
+                    continue;
+                }
+                let n = *path.last().unwrap();
+                if let Some(neighbors) = self.edges.get(&n) {
+                    for &nxt in neighbors {
+                        if path.contains(&nxt) {
+                            continue;
+                        }
+                        let mut newp = path.clone();
+                        newp.push(nxt);
+                        if let Some(p2) = seen.get(&nxt) {
+                            let key = (newp.clone(), p2.clone());
+                            if !seen_pairs.contains(&key) {
+                                seen_pairs.insert(key.clone());
+                                seen_pairs.insert((p2.clone(), newp.clone()));
+                                // Drop the shorter alternative path's internal nodes
+                                let drop_path = if newp.len() < p2.len() { &newp } else { p2 };
+                                to_drop.extend(drop_path.iter().copied());
+                            }
+                        } else {
+                            seen.insert(nxt, newp.clone());
+                            q.push_back(newp);
+                        }
+                    }
+                }
+            }
+        }
+
+        for &n in &to_drop {
+            if let Some(succs) = self.edges.remove(&n) {
+                for v in succs {
+                    *self.in_degree.get_mut(&v).unwrap() -= 1;
+                    self.edge_counts.remove(&(n, v));
+                }
+            }
+            if let Some(parents) = pred.get(&n) {
+                for &p in parents {
+                    if let Some(succs) = self.edges.get_mut(&p) {
+                        if succs.remove(&n) {
+                            *self.out_degree.get_mut(&p).unwrap() -= 1;
+                            self.edge_counts.remove(&(p, n));
+                        }
+                    }
+                }
+            }
+            self.in_degree.remove(&n);
+            self.out_degree.remove(&n);
+            self.node_coverage.remove(&n);
+        }
+
+        self.normalize_nodes();
     }
 
     /// Returns the number of edges in the graph.
@@ -96,13 +305,15 @@ impl KmerGraph {
         self.edges.values().map(|s| s.len()).sum()
     }
 
-    /// Ensure degree maps include every node we know about
+    /// Ensures that all nodes have in/out-degree and KC entries.
     fn normalize_nodes(&mut self) {
-        let all_nodes: StdHashSet<u128> = self.edges.keys()
-            .chain(self.in_degree.keys())
-            .chain(self.out_degree.keys())
-            .chain(self.node_coverage.keys())   // <- include k-mer count nodes
+        let all_nodes: StdHashSet<u128> = self
+            .edges
+            .keys()
             .copied()
+            .chain(self.in_degree.keys().copied())
+            .chain(self.out_degree.keys().copied())
+            .chain(self.node_coverage.keys().copied())
             .collect();
 
         for n in all_nodes {
@@ -113,22 +324,33 @@ impl KmerGraph {
         }
     }
 
-    /// Write GFA with KC (nodes) and EC (edges)
+    /// Writes a GFA snapshot containing KC (node coverage) and EC (edge coverage).
+    ///
+    /// - `S` lines include `KC:i:<count>`
+    /// - `L` lines include `EC:i:<count>`
     pub fn write_gfa(&self, path: &str) -> std::io::Result<()> {
         let file = File::create(path)?;
         let mut w = BufWriter::new(file);
 
         writeln!(w, "H\tVN:Z:1.0")?;
 
-        // union of everything so we don't drop isolated k-mers
+        // Collect all nodes so we don't drop isolated k-mers.
         let mut all_nodes = StdHashSet::new();
         for (&u, succs) in &self.edges {
             all_nodes.insert(u);
-            for &v in succs { all_nodes.insert(v); }
+            for &v in succs {
+                all_nodes.insert(v);
+            }
         }
-        for &n in self.in_degree.keys() { all_nodes.insert(n); }
-        for &n in self.out_degree.keys() { all_nodes.insert(n); }
-        for &n in self.node_coverage.keys() { all_nodes.insert(n); }
+        for &n in self.in_degree.keys() {
+            all_nodes.insert(n);
+        }
+        for &n in self.out_degree.keys() {
+            all_nodes.insert(n);
+        }
+        for &n in self.node_coverage.keys() {
+            all_nodes.insert(n);
+        }
 
         let mut nodes: Vec<_> = all_nodes.into_iter().collect();
         nodes.sort_unstable();
