@@ -1327,7 +1327,7 @@ fn main() {
     let radius_context: usize = 12;   // nodes to include around bubble for compaction
     let flank_kmers: usize = 5;       // preset number of upstream/downstream kmers to export
     let max_paths: usize = 2048;      // candidate cap per bubble
-    const BATCH: usize = 200;         // bubbles per parallel batch (tweak for memory/CPU)
+    const BATCH: usize = 100;         // bubbles per parallel batch (tweak for memory/CPU)
 
     // Load graph + reference
     let (segments, links, edge_cov) = parse_gfa(gfa_path);
