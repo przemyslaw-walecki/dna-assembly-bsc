@@ -1,0 +1,7 @@
+test_genome,wariant,runs,acc_bub_mean,acc_bub_std,acc_dec_mean,acc_dec_std,brier_mean,brier_std,ece_mean,ece_std
+ecoli,Bez LSTM,1,0.42,,0.57,,0.17,,0.2,
+ecoli,Z LSTM,1,0.19,,0.55,,0.18,,0.22,
+klebsiella,Bez LSTM,1,0.58,,0.64,,0.22,,0.2,
+klebsiella,Z LSTM,1,0.54,,0.63,,0.23,,0.16,
+salmonella,Bez LSTM,1,0.41,,0.53,,0.24,,0.06,
+salmonella,Z LSTM,1,0.43,,0.51,,0.21,,0.2,

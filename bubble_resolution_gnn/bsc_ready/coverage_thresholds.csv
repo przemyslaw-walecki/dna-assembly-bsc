@@ -1,0 +1,4 @@
+genome,accuracy,threshold
+salmonella,54.88,3.5
+ecola,54.25,3.5
+klebsiella,60.14,3.5

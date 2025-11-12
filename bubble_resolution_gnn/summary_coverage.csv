@@ -1,0 +1,4 @@
+coverage,acc_bub_mean,acc_bub_std,acc_dec_mean,acc_dec_std
+10,0.68,0.05,0.68,0.05
+20,0.58,0.08,0.59,0.08
+30,0.53,0.02,0.56,0.03
