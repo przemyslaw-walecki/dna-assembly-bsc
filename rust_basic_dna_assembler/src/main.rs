@@ -95,7 +95,12 @@ struct Args {
     #[clap(long)]
     trim_tips: bool,
 
-    
+    /// Bubble resolution mode:
+    ///   - "gnn": run external Python GNN and apply decisions JSONL
+    ///   - "coverage": Rust heuristic (keep highest-coverage edges in each bubble)
+    ///   - "none": do not resolve bubbles
+    #[clap(long, default_value = "gnn")]
+    bubble_resolver: String,
 }
 
 fn run_bubblegun(
@@ -172,6 +177,14 @@ fn run_gnn_script(
 fn main() -> io::Result<()> {
     let args = Args::parse();
 
+    // Simple safety: coverage-based resolver requires BubbleGun output.
+    if args.bubble_resolver == "coverage" && args.skip_bubblegun {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "--bubble-resolver=coverage requires BubbleGun; do not pass --skip-bubblegun",
+        ));
+    }
+
     // Load reads
     let mut reads = FastqParser::new(&args.reads1).load_reads()?;
     reads.extend(FastqParser::new(&args.reads2).load_reads()?);
@@ -223,6 +236,7 @@ fn main() -> io::Result<()> {
     }
 
     // GNN decisions path
+    // (only used when --bubble-resolver=gnn; other modes skip GNN and use heuristics or no resolution)
     let decisions_jsonl = args
         .decisions_jsonl
         .unwrap_or_else(|| "work/decisions.jsonl".to_string());
@@ -232,31 +246,58 @@ fn main() -> io::Result<()> {
         }
     }
 
-    // Run GNN unless skipped
-    if !args.skip_gnn {
-        let Some(script) = args.gnn_script.as_deref() else {
+    // Choose bubble resolution strategy based on CLI flag.
+    match args.bubble_resolver.as_str() {
+        "gnn" => {
+            // Run GNN unless skipped
+            if !args.skip_gnn {
+                let Some(script) = args.gnn_script.as_deref() else {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "Missing --gnn-script (or pass --skip-gnn with an existing --decisions-jsonl).",
+                    ));
+                };
+                eprintln!("[pipeline] running GNN…");
+                run_gnn_script(
+                    &args.python_bin,
+                    script,
+                    &bubbles_jsonl,
+                    &decisions_jsonl,
+                    args.gnn_args.as_deref(),
+                )?;
+                eprintln!("[pipeline] GNN done -> {}", decisions_jsonl);
+            } else {
+                eprintln!("[pipeline] skipping GNN; using {}", decisions_jsonl);
+            }
+
+            // Apply GNN decisions to the in-memory graph
+            eprintln!("[pipeline] applying decisions…");
+            let removed = graph.resolve_bubbles_from_jsonl(&decisions_jsonl)?;
+            eprintln!("[pipeline] removed {} edges via GNN decisions", removed);
+        }
+
+        "coverage" => {
+            // Pure Rust heuristic: for each BubbleGun bubble, keep the highest-EC edge per source.
+            eprintln!("[pipeline] resolving bubbles via coverage heuristic…");
+            let removed = graph.resolve_bubbles_by_coverage_from_bubblegun(&bubbles_jsonl)?;
+            eprintln!(
+                "[pipeline] removed {} edges via coverage-based heuristic",
+                removed
+            );
+        }
+
+        "none" => {
+            // No bubble resolution – you just use the cleaned graph as-is.
+            eprintln!("[pipeline] bubble resolution disabled (--bubble-resolver=none)");
+        }
+
+        other => {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                "Missing --gnn-script (or pass --skip-gnn with an existing --decisions-jsonl).",
+                format!("Unknown --bubble-resolver mode: {other} (expected gnn|coverage|none)"),
             ));
-        };
-        eprintln!("[pipeline] running GNN…");
-        run_gnn_script(
-            &args.python_bin,
-            script,
-            &bubbles_jsonl,
-            &decisions_jsonl,
-            args.gnn_args.as_deref(),
-        )?;
-        eprintln!("[pipeline] GNN done -> {}", decisions_jsonl);
-    } else {
-        eprintln!("[pipeline] skipping GNN; using {}", decisions_jsonl);
+        }
     }
-
-    // Apply GNN decisions to the in-memory graph
-    eprintln!("[pipeline] applying decisions…");
-    let removed = graph.resolve_bubbles_from_jsonl(&decisions_jsonl)?;
-    eprintln!("[pipeline] removed {} edges via GNN decisions", removed);
 
     // Assemble unitigs and write FASTA
     let contigs = Assembler::new(&graph).assemble_unitigs();

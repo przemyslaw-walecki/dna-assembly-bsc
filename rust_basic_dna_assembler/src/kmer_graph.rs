@@ -345,22 +345,27 @@ impl KmerGraph {
             // Very small ad-hoc parser: look for objects with u_id/v_id or u_seq/v_seq
             // This keeps us dependency-free; if you prefer serde_json, switch to that.
             // Attempt serde_json first if available at build time.
-            #[cfg(feature = "serde")]
             {
                 use serde::Deserialize;
                 #[derive(Deserialize)]
                 struct EdgeSpec {
-                    #[serde(default)] u_id: Option<String>,
-                    #[serde(default)] v_id: Option<String>,
-                    #[serde(default)] u_seq: Option<String>,
-                    #[serde(default)] v_seq: Option<String>,
+                    #[serde(default)]
+                    u_id: Option<String>,
+                    #[serde(default)]
+                    v_id: Option<String>,
+                    #[serde(default)]
+                    u_seq: Option<String>,
+                    #[serde(default)]
+                    v_seq: Option<String>,
                 }
                 #[derive(Deserialize)]
                 struct Rec {
                     #[allow(dead_code)]
                     bubble_id: serde_json::Value,
-                    #[serde(default)] keep_edges: Vec<EdgeSpec>,
-                    #[serde(default)] drop_edges: Vec<EdgeSpec>,
+                    #[serde(default)]
+                    keep_edges: Vec<EdgeSpec>,
+                    #[serde(default)]
+                    drop_edges: Vec<EdgeSpec>,
                 }
                 if let Ok(rec) = serde_json::from_str::<Rec>(&line) {
                     for e in rec.keep_edges {
@@ -395,7 +400,6 @@ impl KmerGraph {
                 }
             }
 
-            #[cfg(not(feature = "serde"))]
             {
                 // Minimal, regex-free fallback:
                 // We search for quoted fields and parse naive pairs. This is intentionally simple.
@@ -518,4 +522,225 @@ impl KmerGraph {
         }
         removed
     }
+
+    /// Resolve bubbles using only BubbleGun's JSON and coverage:
+    /// for each bubble, keep the start→end path with **maximum total EC** and
+    /// drop all other internal edges-
+    pub fn resolve_bubbles_by_coverage_from_bubblegun(
+        &mut self,
+        bubbles_path: &str,
+    ) -> std::io::Result<usize> {
+        use serde::Deserialize;
+        use serde_json::{self, Deserializer, Value};
+
+        #[derive(Deserialize)]
+        struct BubbleChain {
+            bubbles: Vec<Bubble>,
+        }
+
+        #[derive(Deserialize)]
+        struct Bubble {
+            #[allow(dead_code)]
+            id: Option<usize>,
+            ends: Vec<String>,
+            #[serde(default)]
+            inside: Vec<String>,
+        }
+
+        let f = File::open(bubbles_path)?;
+        let reader = BufReader::new(f);
+        let stream = Deserializer::from_reader(reader).into_iter::<Value>();
+
+        let mut removed_total = 0usize;
+
+        for val in stream {
+            let v = match val {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+
+            let mut chains: Vec<BubbleChain> = Vec::new();
+
+            if v.is_object() {
+                if let Some(map) = v.as_object() {
+                    for vv in map.values() {
+                        if let Ok(ch) = serde_json::from_value::<BubbleChain>(vv.clone()) {
+                            chains.push(ch);
+                        }
+                    }
+                }
+            } else if v.is_array() {
+                if let Ok(ch_vec) = serde_json::from_value::<Vec<BubbleChain>>(v.clone()) {
+                    chains.extend(ch_vec);
+                }
+            } else if let Ok(ch) = serde_json::from_value::<BubbleChain>(v.clone()) {
+                chains.push(ch);
+            }
+
+            for chain in chains {
+                for b in chain.bubbles {
+                    if b.ends.len() != 2 {
+                        continue;
+                    }
+
+                    let start: u128 = match b.ends[0].parse() {
+                        Ok(x) => x,
+                        Err(_) => continue,
+                    };
+                    let end: u128 = match b.ends[1].parse() {
+                        Ok(x) => x,
+                        Err(_) => continue,
+                    };
+
+                    // Induced subgraph: endpoints + inside nodes
+                    let mut nodes: StdHashSet<u128> = StdHashSet::new();
+                    nodes.insert(start);
+                    nodes.insert(end);
+                    for s in &b.inside {
+                        if let Ok(id) = s.parse::<u128>() {
+                            nodes.insert(id);
+                        }
+                    }
+                    if nodes.len() < 2 {
+                        continue;
+                    }
+
+                    // Build adjacency + indegree restricted to this bubble.
+                    let mut adj: HashMap<u128, Vec<(u128, usize)>> = HashMap::default();
+                    let mut indeg_sub: HashMap<u128, usize> = HashMap::default();
+
+                    for &u in &nodes {
+                        if let Some(succs) = self.edges.get(&u) {
+                            for &v in succs {
+                                if !nodes.contains(&v) {
+                                    continue;
+                                }
+                                let ec = self.edge_counts.get(&(u, v)).copied().unwrap_or(0);
+                                adj.entry(u).or_default().push((v, ec));
+                                *indeg_sub.entry(v).or_default() += 1;
+                                indeg_sub.entry(u).or_default();
+                            }
+                        }
+                    }
+
+                    if !nodes.contains(&start) || !nodes.contains(&end) {
+                        continue;
+                    }
+
+                    // Topological order (Kahn). If not a DAG, skip this bubble safely.
+                    let mut indeg_work = indeg_sub.clone();
+                    let mut q = VecDeque::new();
+                    for &n in &nodes {
+                        if *indeg_work.get(&n).unwrap_or(&0) == 0 {
+                            q.push_back(n);
+                        }
+                    }
+                    let mut topo: Vec<u128> = Vec::new();
+                    while let Some(u) = q.pop_front() {
+                        topo.push(u);
+                        if let Some(neis) = adj.get(&u) {
+                            for &(v, _) in neis {
+                                if let Some(d) = indeg_work.get_mut(&v) {
+                                    if *d > 0 {
+                                        *d -= 1;
+                                        if *d == 0 {
+                                            q.push_back(v);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if topo.len() != nodes.len() {
+                        // Cycle detected in bubble subgraph → leave it untouched.
+                        continue;
+                    }
+
+                    // DP: best coverage-sum path from start to every node.
+                    use std::f64;
+                    let mut score: HashMap<u128, f64> = HashMap::default();
+                    let mut prev: HashMap<u128, u128> = HashMap::default();
+                    for &n in &nodes {
+                        score.insert(n, f64::NEG_INFINITY);
+                    }
+                    if score.contains_key(&start) {
+                        score.insert(start, 0.0);
+                    }
+
+                    for u in topo {
+                        let su = match score.get(&u) {
+                            Some(s) if *s > f64::NEG_INFINITY / 2.0 => *s,
+                            _ => continue,
+                        };
+                        if let Some(neis) = adj.get(&u) {
+                            for &(v, ec) in neis {
+                                let cand = su + (ec as f64);
+                                let entry = score.entry(v).or_insert(f64::NEG_INFINITY);
+                                if cand > *entry {
+                                    *entry = cand;
+                                    prev.insert(v, u);
+                                }
+                            }
+                        }
+                    }
+
+                    let end_score = score.get(&end).copied().unwrap_or(f64::NEG_INFINITY);
+                    if end_score <= f64::NEG_INFINITY / 2.0 {
+                        continue;
+                    }
+
+                    // Reconstruct best path start → end.
+                    let mut path_nodes: Vec<u128> = Vec::new();
+                    let mut cur = end;
+                    path_nodes.push(cur);
+                    while cur != start {
+                        if let Some(&p) = prev.get(&cur) {
+                            cur = p;
+                            path_nodes.push(cur);
+                        } else {
+                            break;
+                        }
+                    }
+                    if *path_nodes.last().unwrap() != start {
+                        continue;
+                    }
+                    path_nodes.reverse();
+
+                    let mut keep_edges: StdHashSet<(u128, u128)> = StdHashSet::new();
+                    for win in path_nodes.windows(2) {
+                        let u = win[0];
+                        let v = win[1];
+                        keep_edges.insert((u, v));
+                    }
+
+                    // Drop all internal edges not on the best-coverage path.
+                    let mut internal_edges: Vec<(u128, u128)> = Vec::new();
+                    for &u in &nodes {
+                        if let Some(succs) = self.edges.get(&u) {
+                            for &v in succs {
+                                if nodes.contains(&v) {
+                                    internal_edges.push((u, v));
+                                }
+                            }
+                        }
+                    }
+                    internal_edges.sort_unstable();
+                    internal_edges.dedup();
+
+                    for (u, v) in internal_edges {
+                        if !keep_edges.contains(&(u, v)) {
+                            if self.remove_edge(u, v) {
+                                removed_total += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        self.normalize_nodes();
+        Ok(removed_total)
+    }
+
+
 }
