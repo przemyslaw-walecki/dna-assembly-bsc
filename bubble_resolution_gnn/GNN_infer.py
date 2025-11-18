@@ -489,8 +489,8 @@ def load_model(ckpt_path: Path, device: torch.device, use_lstm: bool = False) ->
     model = HyperbubbleGNN(
         vocab_size=5,
         embed_dim=16,
-        gcn_hidden=32,
-        edge_hidden=16,
+        gcn_hidden=64,
+        edge_hidden=64,
         edge_feat_dim=5,
         use_lstm=use_lstm,
     ).to(device)
