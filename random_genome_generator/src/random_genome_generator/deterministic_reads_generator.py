@@ -1,20 +1,35 @@
 """
-generate_reads.py: Deterministic sliding-window read generator
+Generator deterministycznych odczytów sliding-window z pliku FASTA.
 
-Reads a FASTA file and generates all possible reads of a specified length
-in FASTQ format with a fixed quality score ('I').
+Moduł wczytuje sekwencje referencyjne w formacie FASTA i generuje wszystkie
+możliwe odczyty o zadanej długości, przesuwając okno o jeden nukleotyd.
+Wynik zapisywany jest w formacie FASTQ z jednolitym ciągiem jakości ('I').
 
-Usage:
-    python generate_reads.py <source_fasta> <read_length> [--output OUTPUT]
+Przykładowe użycie:
+    python deterministic_reads_generator.py source.fna 20 --output reads.fq
 
-Example:
-    python generate_reads.py random_50.fna 20 --output reads50.fq
+Zastosowanie:
+    - testowanie assemblerów,
+    - walidacja pipeline’ów montażu,
+    - generowanie syntetycznych danych pozbawionych losowości.
 """
+
 import argparse
 from pathlib import Path
 
+
 def parse_fasta(path):
-    """Simple FASTA parser yielding (header, sequence) tuples."""
+    """
+    Prosty parser FASTA zwracający pary (nagłówek, sekwencja).
+
+    Działa strumieniowo — nie wczytuje całego pliku do pamięci.
+
+    Argumenty:
+        path (str | Path): Ścieżka do pliku FASTA.
+
+    Zwraca:
+        generator[tuple[str, str]]: Para (header, sequence).
+    """
     header = None
     seq_lines = []
     with open(path, 'r') as f:
@@ -34,33 +49,59 @@ def parse_fasta(path):
 
 
 def main():
+    """
+    Główna funkcja CLI generująca deterministyczne odczyty FASTQ.
+
+    Działanie:
+        1. Wczytuje sekwencje z pliku FASTA.
+        2. Dla każdej sekwencji generuje wszystkie możliwe odczyty
+           o zadanej długości (okno przesuwane o 1).
+        3. Zapisuje odczyty w formacie FASTQ z jakością 'I'.
+
+    Argumenty wejściowe:
+        source (plik FASTA),
+        read_length (długość odczytu),
+        --output / -o (ścieżka wyjściowa FASTQ).
+
+    Wynik:
+        Plik FASTQ zawierający deterministyczne odczyty sliding-window.
+    """
     parser = argparse.ArgumentParser(
-        description="Generate deterministic sliding-window reads from a FASTA.")
+        description="Generuj deterministyczne odczyty sliding-window z FASTA."
+    )
     parser.add_argument(
         'source',
-        help='Input FASTA file containing one or more reference sequences')
+        help='Plik FASTA zawierający jedną lub więcej sekwencji referencyjnych'
+    )
     parser.add_argument(
         'read_length',
         type=int,
-        help='Length of each read to generate (must be <= reference length)')
+        help='Długość pojedynczego odczytu (musi być ≤ długości sekwencji)'
+    )
     parser.add_argument(
         '--output',
         '-o',
-        help='Output FASTQ file (default: <source_stem>_reads_<read_length>.fq)')
+        help='Plik wyjściowy FASTQ (domyślnie <nazwa>_reads_<len>.fq)'
+    )
     args = parser.parse_args()
 
     read_len = args.read_length
     src = Path(args.source)
-    out_path = Path(args.output) if args.output else src.with_name(f"{src.stem}_reads_{read_len}.fq")
+    out_path = Path(args.output) if args.output else src.with_name(
+        f"{src.stem}_reads_{read_len}.fq"
+    )
 
-    total_reads = 0
     with open(out_path, 'w') as out_f:
         for header, seq in parse_fasta(src):
             n = len(seq)
             if read_len > n:
-                raise ValueError(f"Read length {read_len} is longer than sequence {header} length {n}")
+                raise ValueError(
+                    f"Długość odczytu {read_len} przekracza długość sekwencji {header} ({n})"
+                )
             for i in range(n - read_len + 1):
                 read_seq = seq[i:i + read_len]
                 quals = 'I' * read_len
                 out_f.write(f"@{header}_{i}\n")
                 out_f.write(f"{read_seq}\n")
+                out_f.write("+\n")
+                out_f.write(f"{quals}\n")
