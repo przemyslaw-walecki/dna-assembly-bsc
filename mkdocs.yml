@@ -1,4 +1,4 @@
-site_name: AI Dna Assembler Documentation
+site_name: Dokumentacja projektu AI DNA Assembler
 use_directory_urls: false
 
 theme:
@@ -14,7 +14,7 @@ plugins:
             heading_level: 2
 
 nav:
-  - Home: index.md
-  - Dna assembler in python: dna_asm_python.md
-  - Random genome generator & sequencer: random_generator_and_sequencer.md
-  - Dna assembler in Rust: rust.md
+  - Strona Główna: index.md
+  - Assembler w Python: dna_asm_python.md
+  - Generator losowego genomu: random_generator_and_sequencer.md
+  - Moduły Rust: rust.md

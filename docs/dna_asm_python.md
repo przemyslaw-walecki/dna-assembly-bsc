@@ -1,6 +1,8 @@
-# DNA Assembler in Python
+# Assembler DNA w Pythonie
 
-API Documentation of Python implementation of a basic dna assembler.
+Dokumentacja API implementacji podstawowego assemblera DNA w Pythonie.
+
+Poniżej znajduje się pełna referencja modułu wraz z podmodułami:
 
 ::: basic_dna_assembler
     options:

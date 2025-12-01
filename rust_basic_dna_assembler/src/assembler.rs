@@ -35,8 +35,7 @@ impl<'g> Assembler<'g> {
     /// Składa kontigi metodą opartą na klasycznych ścieżkach 1→1.
     ///
     /// Metoda utrzymana jako nieużywana: zachowana w celu porównawczym i
-    /// dokumentacyjnym. Domyślnym algorytmem produkcji kontigów jest
-    /// [`assemble_unitigs`].
+    /// dokumentacyjnym.
     pub fn assemble_contigs(&self) -> Vec<String> {
         let mut contigs = Vec::new();
         let mut visited = HashSet::new();
