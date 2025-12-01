@@ -1,15 +1,17 @@
-//! Command-line interface for the AI DNA assembler.
+//! Interfejs wiersza poleceń dla assemblera AI DNA.
 //!
-//! This module loads sequencing reads from paired FASTQ files, constructs a k-mer de Bruijn graph,
-//! performs graph cleaning operations, assembles contigs, and writes the result to a FASTA file.
+//! Ten moduł odpowiada za pełny pipeline składania genomu na podstawie
+//! dwustronnych odczytów FASTQ.  
 //!
-//! # Functionality
+//! Główne etapy działania:
+//! - wczytywanie odczytów z plików FASTQ,
+//! - budowa grafu de Bruijna na podstawie k-merów,
+//! - czyszczenie grafu (filtrowanie, usuwanie zakończeń, usuwanie bąbli),
+//! - składanie kontigów z uproszczonego grafu,
+//! - zapis wyników do pliku FASTA lub GFA.
 //!
-//! - Parses command-line arguments
-//! - Loads reads using `FastqParser`
-//! - Builds and cleans the graph via `KmerGraph`
-//! - Assembles contigs with `Assembler`
-//! - Outputs contigs to `data/{output_file}` in FASTA format
+//! Obecna wersja zapisuje grafik do GFA,
+//! a kod odpowiedzialny za składanie kontigów może być aktywowany w przyszłych krokach.
 
 mod assembler;
 mod fastq_parser;
@@ -23,85 +25,105 @@ use std::fs;
 use std::io::{self, Write};
 use std::path::Path;
 
-/// Command-line arguments for the assembler.
+/// Struktura opisująca argumenty wiersza poleceń.
 ///
-/// Provides options for input files, k-mer length, filtering threshold, pruning depth,
-/// bubble detection depth, and output path.
+/// Opcje umożliwiają konfigurację:
+/// - wejściowych plików FASTQ (pierwszy i drugi koniec),
+/// - długości k-mera,
+/// - progu filtrowania krawędzi,
+/// - głębokości usuwania zakończeń,
+/// - głębokości usuwania bąbli,
+/// - nazwy pliku wynikowego.
 #[derive(Parser)]
 struct Args {
-    /// Path to the first FASTQ file (`-1`)
+    /// Ścieżka do pierwszego pliku FASTQ (`-1`)
     #[clap(short = '1')]
     reads1: String,
 
-    /// Path to the second FASTQ file (`-2`)
+    /// Ścieżka do drugiego pliku FASTQ (`-2`)
     #[clap(short = '2')]
     reads2: String,
 
-    /// Length of k-mers to use in the de Bruijn graph (`-k`)
+    /// Długość k-mera wykorzystywana w grafie de Bruijna (`-k`)
     #[clap(short, long, default_value = "55")]
     kmer: usize,
 
-    /// Minimum edge count to retain in the graph (`-t`)
+    /// Minimalne pokrycie krawędzi, które pozostaje w grafie (`-t`)
     #[clap(short, long, default_value = "0")]
     threshold: usize,
 
-    /// Maximum depth for dead-end pruning (`-d`)
+    /// Maksymalna głębokość usuwania zakończeń (`-d`)
     #[clap(short = 'd', long, default_value = "5")]
     depth: usize,
 
-    /// Maximum depth for bubble removal (`-b`)
+    /// Maksymalna głębokość usuwania bąbli (`-b`)
     #[clap(short = 'b', long, default_value = "20")]
     bubble_depth: usize,
 
-    /// Output file name for contigs (`-o`)
+    /// Nazwa pliku wynikowego (`-o`)
     #[clap(short = 'o', long, default_value = "assembled.fa")]
     output: String,
 }
 
-/// Main entry point for the assembler pipeline.
+/// Główna funkcja pipeline'u assemblera.
 ///
-/// This function loads the reads, constructs and cleans the graph, assembles the contigs,
-/// and writes them to a FASTA file.
-///
-/// # Errors
-/// Returns `io::Error` if reading or writing files fails.
+/// Odpowiada za:
+/// - wczytanie odczytów FASTQ,
+/// - zbudowanie grafu k-merowego,
+/// - uruchomienie operacji czyszczących,
+/// - zapis wyników.
+/// 
+/// # Zwraca
+/// Zwraca `io::Result<()>` — błąd tylko w wypadku problemów z I/O.
 fn main() -> io::Result<()> {
     let args = Args::parse();
 
-    // Load reads from both FASTQ files
+    // Wczytanie odczytów z dwóch plików FASTQ
     let mut reads = FastqParser::new(&args.reads1).load_reads()?;
     reads.extend(FastqParser::new(&args.reads2).load_reads()?);
 
-    // Build and clean the k-mer graph
+    // Utworzenie grafu k-merów
     let mut graph = KmerGraph::new(args.kmer);
 
+    // Budowa grafu de Bruijna
     graph.build(&reads);
-    //graph.filter_low_coverage(args.threshold);
+
+    // Etap filtracji i czyszczenia grafu — obecnie wyłączony,
+    // ale może zostać aktywowany podczas testów.
+    //
+    // graph.filter_low_coverage(args.threshold);
     // graph.remove_dead_ends(Some(args.depth));
-    graph.write_gfa(&args.output).unwrap();
     // graph.remove_bubbles(args.bubble_depth);
 
-    // Basic graph stats
-    eprintln!("Loaded {} reads", reads.len());
+    // Zapis grafu do GFA — aktualnie główny cel etapu Rust
+    graph.write_gfa(&args.output).unwrap();
+
+    // Podstawowe statystyki grafu
+    eprintln!("Wczytano {} odczytów", reads.len());
     let edge_cnt = graph.edge_count();
     let node_cnt = graph.in_degree.len();
+
+    // Węzły bez poprzedników (źródła)
     let zero_indeg: Vec<_> = graph
         .in_degree
         .iter()
         .filter_map(|(&u, &d)| if d == 0 { Some(u) } else { None })
         .collect();
+
     eprintln!(
-        "Graph: {} edges, {} nodes; {} sources (in_deg=0)",
+        "Graf: {} krawędzi, {} węzłów; {} źródeł (in_deg=0)",
         edge_cnt, node_cnt, zero_indeg.len()
     );
-    //for &u in zero_indeg.iter().take(5) {
-    //    eprintln!(" source kmer: {}", graph.decode(u));
-    //}
 
-    // Assemble contigs from the cleaned graph
-    //let contigs = Assembler::new(&graph).assemble_contigs();
+    // Debug: można wypisać przykładowe k-mery źródłowe
+    // for &u in zero_indeg.iter().take(5) {
+    //     eprintln!(" źródło: {}", graph.decode(u));
+    // }
 
-    //Write contigs to output file in FASTA format
+    // Składanie kontigów — aktualnie wyłączone
+    //
+    // let contigs = Assembler::new(&graph).assemble_contigs();
+    //
     // fs::create_dir_all("data")?;
     // let out_path = Path::new("data").join(&args.output);
     // let mut f = fs::File::create(&out_path)?;
@@ -109,7 +131,7 @@ fn main() -> io::Result<()> {
     //     writeln!(f, ">contig_{}", i + 1)?;
     //     writeln!(f, "{}", c)?;
     // }
+    // println!("Zapisano {} kontigów do {:?}", contigs.len(), out_path);
 
-    // println!("Wrote {} contigs to {:?}", contigs.len(), out_path);
     Ok(())
 }
