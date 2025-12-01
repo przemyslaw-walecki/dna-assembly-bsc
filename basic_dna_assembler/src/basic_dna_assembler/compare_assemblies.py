@@ -1,3 +1,16 @@
+"""
+Moduł narzędziowy do porównywania wyników składania genomów.
+
+Umożliwia:
+- wyrównanie kontigów do genomu referencyjnego za pomocą programu minimap2,
+- obliczenie statystyk dopasowania,
+- zapisanie wyników do pliku CSV,
+- generowanie podsumowania w formacie Markdown.
+
+Zawiera także interfejs CLI, który może analizować wiele assemblerów naraz
+przy założeniu, że kontigi zostały zapisane jako `assembled_{nazwa}.fa`.
+"""
+
 import argparse
 import os
 import csv
@@ -8,8 +21,23 @@ import re
 
 def evaluate_assembly(name, reference, contigs_path, writer, ref_label):
     """
-    Align contigs to the reference with minimap2, parse the SAM,
-    and write one CSV row of metrics including the reference label.
+    Wyrównuje kontigi do genomu referencyjnego i zapisuje statystyki.
+
+    Funkcja uruchamia minimap2 w trybie SAM, analizuje wynik i oblicza:
+    - liczbę wszystkich rekordów,
+    - liczbę rekordów dopasowanych,
+    - procent dopasowanych,
+    - średnią długość segmentów typu „M” w CIGAR,
+    - średnią liczbę błędów (znacznik NM).
+
+    Wyniki są zapisywane jako jeden wiersz w pliku CSV.
+
+    Argumenty:
+        name (str): Nazwa assemblera.
+        reference (str): Ścieżka do genomu referencyjnego.
+        contigs_path (str): Ścieżka do pliku FASTA z kontigami.
+        writer (csv.DictWriter): Obiekt zapisujący wiersz danych.
+        ref_label (str): Etykieta opisująca genom referencyjny.
     """
     sam_file = os.path.abspath(f"{name}.sam")
     try:
@@ -21,10 +49,10 @@ def evaluate_assembly(name, reference, contigs_path, writer, ref_label):
             check=True,
         )
     except FileNotFoundError:
-        print("ERROR: minimap2 not found! Please install minimap2.")
+        print("Błąd: minimap2 nie jest zainstalowany.")
         return
     except subprocess.CalledProcessError as e:
-        print(f"Error running minimap2 on {name}:\n{e.stderr}")
+        print(f"Błąd podczas uruchamiania minimap2 dla {name}:\n{e.stderr}")
         return
 
     with open(sam_file, "w") as f:
@@ -67,31 +95,38 @@ def evaluate_assembly(name, reference, contigs_path, writer, ref_label):
     )
 
     print(
-        f"-> {name}: {aligned}/{total} aligned (avg_len={avg_len:.1f}, avg_mm={avg_mm:.2f})"
+        f"-> {name}: {aligned}/{total} dopasowanych "
+        f"(śr. długość={avg_len:.1f}, śr. błędy={avg_mm:.2f})"
     )
 
 
 def append_markdown_table(csv_path, md_log, ref_label):
     """
-    Append a Markdown summary table of the CSV results, including
-    the short reference label at the top of the section.
+    Dodaje do pliku Markdown tabelę podsumowującą wyniki z pliku CSV.
+
+    Argumenty:
+        csv_path (str): Ścieżka do pliku CSV z wynikami.
+        md_log (str): Ścieżka do pliku Markdown.
+        ref_label (str): Opis analizowanego genomu referencyjnego.
     """
     with open(csv_path) as f:
         rows = list(csv.DictReader(f))
 
     headers = [
-        "Reference",
+        "Referencja",
         "Assembler",
-        "Total",
-        "Aligned",
-        "% Aligned",
-        "Avg Len",
-        "Avg MM",
+        "Łącznie",
+        "Dopasowane",
+        "% Dopas.",
+        "Śr. długość",
+        "Śr. błędy",
     ]
+
     lines = [
         "| " + " | ".join(headers) + " |",
         "| " + " | ".join(["---"] * len(headers)) + " |",
     ]
+
     for r in rows:
         lines.append(
             f"| {r['reference']} | {r['assembler']} | {r['total']} "
@@ -103,9 +138,9 @@ def append_markdown_table(csv_path, md_log, ref_label):
             textwrap.dedent(
                 f"""
 
-        ### Assembly Comparison Results
+        ### Wyniki porównania montażu
 
-        **Reference genome:** `{ref_label}`
+        **Genom referencyjny:** `{ref_label}`
 
         """
             )
@@ -115,41 +150,36 @@ def append_markdown_table(csv_path, md_log, ref_label):
 
 def main():
     """
-    Parse arguments, evaluate each assembled contigs file, and
-    write both CSV metrics and a Markdown summary.
+    Główny punkt wejścia CLI do porównywania wyników montażu genomów.
+
+    Skrypt:
+    1. Sprawdza istnienie genomu referencyjnego.
+    2. Dla każdego assemblera wyszukuje plik `assembled_{nazwa}.fa`.
+    3. Wykonuje wyrównanie minimap2.
+    4. Zapisuje wyniki do CSV.
+    5. Dopisuje podsumowanie w formacie Markdown.
+
+    Obsługiwane opcje:
+        --data-dir  : katalog z kontigami,
+        --reference : genom referencyjny,
+        --assemblers: lista nazw assemblerów,
+        --output    : wynikowy plik CSV,
+        --md-log    : log w formacie Markdown.
     """
     parser = argparse.ArgumentParser(
-        description="Evaluate existing assembled contigs and aggregate metrics"
+        description="Ewaluacja i porównanie gotowych plików kontigów."
     )
-    parser.add_argument(
-        "--data-dir",
-        "-d",
-        default="./data",
-        help="Directory containing assembled_{name}.fa files",
-    )
-    parser.add_argument(
-        "--reference", "-r", required=True, help="Reference genome FASTA"
-    )
-    parser.add_argument(
-        "--assemblers", "-a", nargs="+", default=["dnaasm"], help="Names of assemblers"
-    )
-    parser.add_argument(
-        "--output",
-        "-o",
-        default="assembly_comparison.csv",
-        help="CSV file to write metrics to",
-    )
-    parser.add_argument(
-        "--md-log",
-        "-m",
-        default="comparison.log.md",
-        help="Markdown log file to append summary to",
-    )
+    parser.add_argument("--data-dir", "-d", default="./data")
+    parser.add_argument("--reference", "-r", required=True)
+    parser.add_argument("--assemblers", "-a", nargs="+", default=["dnaasm"])
+    parser.add_argument("--output", "-o", default="assembly_comparison.csv")
+    parser.add_argument("--md-log", "-m", default="comparison.log.md")
+
     args = parser.parse_args()
 
     reference = os.path.abspath(args.reference)
     if not os.path.exists(reference):
-        parser.error(f"Reference not found: {reference}")
+        parser.error(f"Nie znaleziono referencji: {reference}")
     ref_label = "/" + os.path.basename(reference)
 
     with open(args.output, "w", newline="") as csvfile:
@@ -168,13 +198,13 @@ def main():
         for name in args.assemblers:
             contigs = os.path.join(args.data_dir, f"assembled_{name}.fa")
             if not os.path.exists(contigs):
-                print(f"→ Skipping {name}: {contigs} not found")
+                print(f"→ Pomijam {name}: brak pliku {contigs}")
                 continue
             evaluate_assembly(name, reference, contigs, writer, ref_label)
 
     append_markdown_table(args.output, args.md_log, ref_label)
-    print(f"\nResults written to {args.output}")
-    print(f"Markdown log updated at {args.md_log}")
+    print(f"\nWyniki zapisane do {args.output}")
+    print(f"Podsumowanie dopisano do {args.md_log}")
 
 
 if __name__ == "__main__":
