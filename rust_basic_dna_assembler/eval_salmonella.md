@@ -1,0 +1,9 @@
+
+### Minimap2 Assembly Comparison
+
+**Reference genome:** `Salmonella_enterica_subsp_enterica_serovar_Typhimurium_str_LT2.fasta`
+
+| Reference | Assembly | Total | Aligned | % Aligned | Avg Len | Avg MM |
+| --- | --- | --- | --- | --- | --- | --- |
+| Salmonella_enterica_subsp_enterica_serovar_Typhimurium_str_LT2.fasta | heurstic_assembled_salmonella_k21_cov20.fa | 9416 | 5088 | 54.0 | 1905.1 | 0.14 |
+| Salmonella_enterica_subsp_enterica_serovar_Typhimurium_str_LT2.fasta | ai_assembled_salmonella_k21_cov20.fa | 10568 | 6177 | 58.5 | 1556.5 | 0.15 |
