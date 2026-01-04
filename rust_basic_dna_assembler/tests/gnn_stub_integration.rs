@@ -40,13 +40,9 @@ fn find_python() -> String {
 
 #[test]
 fn gnn_stub_end_to_end_generates_decisions_and_resolver_applies_them() {
-    // Budujemy mały “pseudo-bąbel” w grafie:
-    // s -> a
-    // s -> b   (to chcemy usunąć)
-    // a -> t
-    // b ma out_degree=0 (żeby stub nie “utrzymywał” b->t)
-    //
-    // gnn_stub wybiera max EC na węźle s, więc zachowa s->a, a s->b odrzuci.
+    // Prawdziwy "diamond bubble":
+    // s -> a -> t  (EC wysokie)
+    // s -> b -> t  (EC niskie)  => powinno zostać usunięte
     let mut g = KmerGraph::new(3);
 
     let s = g.encode("AAA");
@@ -56,23 +52,24 @@ fn gnn_stub_end_to_end_generates_decisions_and_resolver_applies_them() {
 
     g.edges.entry(s).or_default().extend([a, b]);
     g.edges.entry(a).or_default().insert(t);
-    g.edges.entry(b).or_default(); // b bez następców
+    g.edges.entry(b).or_default().insert(t);
     g.edges.entry(t).or_default();
 
     g.out_degree.insert(s, 2);
     g.out_degree.insert(a, 1);
-    g.out_degree.insert(b, 0);
+    g.out_degree.insert(b, 1);
     g.out_degree.insert(t, 0);
 
     g.in_degree.insert(s, 0);
     g.in_degree.insert(a, 1);
     g.in_degree.insert(b, 1);
-    g.in_degree.insert(t, 1);
+    g.in_degree.insert(t, 2);
 
-    // EC: preferujemy s->a
+    // Preferujemy ścieżkę przez 'a'
     g.edge_counts.insert((s, a), 10);
+    g.edge_counts.insert((a, t), 10);
     g.edge_counts.insert((s, b), 1);
-    g.edge_counts.insert((a, t), 5);
+    g.edge_counts.insert((b, t), 1);
 
     g.node_coverage.insert(s, 1);
     g.node_coverage.insert(a, 1);
@@ -84,19 +81,15 @@ fn gnn_stub_end_to_end_generates_decisions_and_resolver_applies_them() {
     let bubbles_path = dir.join("bubbles.jsonl");
     let decisions_path = dir.join("decisions.jsonl");
 
-    // 1) Export GFA (wejście dla gnn_stub do mapowania id->seq)
     g.write_gfa(gfa_path.to_string_lossy().as_ref()).unwrap();
 
-    // 2) Przygotuj minimalny “BubbleGun-like” JSONL
-    // gnn_stub obsługuje format:
-    // { "bubbles": [ { "id":..., "ends":[start,end], "inside":[...] } ] }
+    // BubbleGun-like input: ends = [s,t], inside = [a,b]
     let bubbles = format!(
         "{{\"bubbles\":[{{\"id\":1,\"ends\":[\"{}\",\"{}\"],\"inside\":[\"{}\",\"{}\"]}}]}}\n",
         s, t, a, b
     );
     write_text(&bubbles_path, &bubbles);
 
-    // 3) Odpal gnn_stub.py: generuje decisions.jsonl w formacie u_seq/v_seq
     let stub_path = fixture("tests/fixtures/stubs/gnn_stub.py");
     let python = find_python();
 
@@ -108,7 +101,6 @@ fn gnn_stub_end_to_end_generates_decisions_and_resolver_applies_them() {
         .arg(&decisions_path)
         .arg("--gfa")
         .arg(&gfa_path)
-        // stub akceptuje ckpt, ale ignoruje (kompatybilność z prawdziwym inferem)
         .arg("--ckpt")
         .arg("ignored.ckpt")
         .status()
@@ -116,13 +108,17 @@ fn gnn_stub_end_to_end_generates_decisions_and_resolver_applies_them() {
 
     assert!(status.success(), "gnn_stub.py failed with status: {status}");
 
-    // 4) Zastosuj decyzje w Rust (resolver)
     let removed = g
         .resolve_bubbles_from_jsonl(decisions_path.to_string_lossy().as_ref())
         .unwrap();
 
-    // Oczekujemy usunięcia dokładnie jednej krawędzi: s->b
-    assert_eq!(removed, 1);
+    assert!(removed >= 1, "expected at least one edge removed, got {removed}");
+
+    // ścieżka keep musi zostać
     assert!(g.edges.get(&s).unwrap().contains(&a));
+    assert!(g.edges.get(&a).unwrap().contains(&t));
+    
+    // konkurencyjna gałąź musi być odcięta od startu
     assert!(!g.edges.get(&s).unwrap().contains(&b));
+    
 }

@@ -343,192 +343,223 @@ impl KmerGraph {
         Ok(())
     }
 
-    // ------------------------------------------------------------------------
-    // NEW: In-graph application of GNN bubble decisions
-    // ------------------------------------------------------------------------
+/// Apply bubble resolutions from a decisions JSONL file produced by your GNN.
+///
+/// Expected per line (flexible):
+/// {
+///   "bubble_id": ...,
+///   "keep_edges": [ {"u_id":"..","v_id":".."} OR {"u_seq":"..","v_seq":".."} ],
+///   "drop_edges": [ ... ] // optional
+/// }
+///
+/// Behavior:
+/// - Always remove explicit `drop_edges` first (if present).
+/// - If `drop_edges` is absent, we try to infer the bubble boundary:
+///   * reconstruct (start,end) from the kept edges (a kept path),
+///   * collect nodes reachable from start within `max_steps`,
+///   * collect nodes that can reach end within `max_steps` (reverse BFS),
+///   * bubble_nodes = intersection,
+///   * remove every internal edge u->v within bubble_nodes unless it is kept.
+///
+/// Returns number of removed edges.
+pub fn resolve_bubbles_from_jsonl(&mut self, decisions_path: &str) -> std::io::Result<usize> {
+    use serde::Deserialize;
 
-    /// Apply bubble resolutions from a decisions JSONL file produced by your GNN.
-    ///
-    /// See the header for the expected JSON shape. This function is tolerant:
-    /// it accepts edges specified either as `{"u_id":"<u128-dec>", "v_id":"<u128-dec>"}`
-    /// or `{"u_seq":"<k-mer>", "v_seq":"<k-mer>"}`.
-    ///
-    /// Returns the number of edges removed.
-    pub fn resolve_bubbles_from_jsonl(&mut self, decisions_path: &str) -> std::io::Result<usize> {
-        let f = File::open(decisions_path)?;
-        let reader = BufReader::new(f);
+    #[derive(Deserialize)]
+    struct EdgeSpec {
+        #[serde(default)]
+        u_id: Option<String>,
+        #[serde(default)]
+        v_id: Option<String>,
+        #[serde(default)]
+        u_seq: Option<String>,
+        #[serde(default)]
+        v_seq: Option<String>,
+    }
 
-        let mut removed_edges_total = 0usize;
+    #[derive(Deserialize)]
+    struct Rec {
+        #[allow(dead_code)]
+        bubble_id: serde_json::Value,
+        #[serde(default)]
+        keep_edges: Vec<EdgeSpec>,
+        #[serde(default)]
+        drop_edges: Vec<EdgeSpec>,
+    }
 
-        for line in reader.lines() {
-            let line = line?;
-            if line.trim().is_empty() {
-                continue;
-            }
+    let f = File::open(decisions_path)?;
+    let reader = BufReader::new(f);
 
-            // Use a light JSON parsing strategy without extra deps:
-            // We try to extract keep_edges and drop_edges arrays in a forgiving way.
-            let mut keep_pairs: Vec<(u128, u128)> = Vec::new();
-            let mut drop_pairs: Vec<(u128, u128)> = Vec::new();
+    // Build predecessor map once (for reverse BFS).
+    let mut pred: HashMap<u128, Vec<u128>> = HashMap::default();
+    for (&u, succs) in &self.edges {
+        for &v in succs {
+            pred.entry(v).or_default().push(u);
+        }
+    }
 
-            // Very small ad-hoc parser: look for objects with u_id/v_id or u_seq/v_seq
-            // This keeps us dependency-free; if you prefer serde_json, switch to that.
-            // Attempt serde_json first if available at build time.
-            {
-                use serde::Deserialize;
-                #[derive(Deserialize)]
-                struct EdgeSpec {
-                    #[serde(default)]
-                    u_id: Option<String>,
-                    #[serde(default)]
-                    v_id: Option<String>,
-                    #[serde(default)]
-                    u_seq: Option<String>,
-                    #[serde(default)]
-                    v_seq: Option<String>,
-                }
-                #[derive(Deserialize)]
-                struct Rec {
-                    #[allow(dead_code)]
-                    bubble_id: serde_json::Value,
-                    #[serde(default)]
-                    keep_edges: Vec<EdgeSpec>,
-                    #[serde(default)]
-                    drop_edges: Vec<EdgeSpec>,
-                }
-                if let Ok(rec) = serde_json::from_str::<Rec>(&line) {
-                    for e in rec.keep_edges {
-                        if let (Some(u), Some(v)) = (e.u_id.as_deref(), e.v_id.as_deref()) {
-                            if let (Ok(uu), Ok(vv)) = (u.parse::<u128>(), v.parse::<u128>()) {
-                                keep_pairs.push((uu, vv));
-                                continue;
-                            }
-                        }
-                        if let (Some(us), Some(vs)) = (e.u_seq.as_deref(), e.v_seq.as_deref()) {
-                            let uu = self.encode(us);
-                            let vv = self.encode(vs);
-                            keep_pairs.push((uu, vv));
-                        }
-                    }
-                    for e in rec.drop_edges {
-                        if let (Some(u), Some(v)) = (e.u_id.as_deref(), e.v_id.as_deref()) {
-                            if let (Ok(uu), Ok(vv)) = (u.parse::<u128>(), v.parse::<u128>()) {
-                                drop_pairs.push((uu, vv));
-                                continue;
-                            }
-                        }
-                        if let (Some(us), Some(vs)) = (e.u_seq.as_deref(), e.v_seq.as_deref()) {
-                            let uu = self.encode(us);
-                            let vv = self.encode(vs);
-                            drop_pairs.push((uu, vv));
-                        }
-                    }
-                } else {
-                    // Fall back to no-op on this line
-                    continue;
-                }
-            }
+    let mut removed_total = 0usize;
 
-            {
-                // Minimal, regex-free fallback:
-                // We search for quoted fields and parse naive pairs. This is intentionally simple.
-                fn find_pairs(s: &str, key: &str) -> Vec<String> {
-                    let mut out = Vec::new();
-                    let mut start = 0usize;
-                    let tgt = format!("\"{}\"", key);
-                    while let Some(idx) = s[start..].find(&tgt) {
-                        let i = start + idx + tgt.len();
-                        if let Some(colon) = s[i..].find(':') {
-                            let j = i + colon + 1;
-                            if let Some(q1) = s[j..].find('"') {
-                                let a = j + q1 + 1;
-                                if let Some(q2) = s[a..].find('"') {
-                                    out.push(s[a..a + q2].to_string());
-                                    start = a + q2 + 1;
-                                    continue;
-                                }
-                            }
-                        }
-                        break;
-                    }
-                    out
-                }
-
-                let u_ids = find_pairs(&line, "u_id");
-                let v_ids = find_pairs(&line, "v_id");
-                let u_seqs = find_pairs(&line, "u_seq");
-                let v_seqs = find_pairs(&line, "v_seq");
-
-                // Prefer id pairs when counts match; otherwise fallback to seq pairs
-                if !u_ids.is_empty() && u_ids.len() == v_ids.len() {
-                    for (u, v) in u_ids.iter().zip(v_ids.iter()) {
-                        if let (Ok(uu), Ok(vv)) = (u.parse::<u128>(), v.parse::<u128>()) {
-                            keep_pairs.push((uu, vv));
-                        }
-                    }
-                } else if !u_seqs.is_empty() && u_seqs.len() == v_seqs.len() {
-                    for (us, vs) in u_seqs.iter().zip(v_seqs.iter()) {
-                        keep_pairs.push((self.encode(us), self.encode(vs)));
-                    }
-                }
-
-                // Optional explicit drop_edges present? Try to detect a separate block
-                // If your file does not use drop_edges, this remains empty (that's fine).
-                // For brevity, we won't implement a second pass here; keep `drop_pairs` empty.
-            }
-
-            // If explicit drop edges are present, remove them first.
-            let mut removed_here = 0usize;
-            for (u, v) in drop_pairs {
-                if self.remove_edge(u, v) {
-                    removed_here += 1;
-                }
-            }
-
-            // If we have keep_edges, infer the bubble’s subgraph boundary from those nodes:
-            if !keep_pairs.is_empty() {
-                let mut bubble_nodes: StdHashSet<u128> = StdHashSet::new();
-                for (u, v) in &keep_pairs {
-                    bubble_nodes.insert(*u);
-                    bubble_nodes.insert(*v);
-                }
-
-                // Build a set of edges to keep for quick lookup
-                let mut keep_set: HashSet<(u128, u128)> = HashSet::default();
-                for (u, v) in &keep_pairs {
-                    keep_set.insert((*u, *v));
-                }
-
-                // For every internal edge u->v where u and v both in bubble_nodes:
-                // drop it unless it is explicitly kept.
-                // We must collect to avoid mutating while iterating.
-                let mut internal_edges: Vec<(u128, u128)> = Vec::new();
-                for (&u, succs) in &self.edges {
-                    if !bubble_nodes.contains(&u) {
-                        continue;
-                    }
-                    for &v in succs {
-                        if bubble_nodes.contains(&v) {
-                            internal_edges.push((u, v));
-                        }
-                    }
-                }
-
-                for (u, v) in internal_edges {
-                    if !keep_set.contains(&(u, v)) {
-                        if self.remove_edge(u, v) {
-                            removed_here += 1;
-                        }
-                    }
-                }
-            }
-
-            removed_edges_total += removed_here;
+    for line in reader.lines() {
+        let line = line?;
+        if line.trim().is_empty() {
+            continue;
         }
 
-        self.normalize_nodes();
-        Ok(removed_edges_total)
+        let rec: Rec = match serde_json::from_str(&line) {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+
+        // Parse keep/drop edges into (u128,u128)
+        let mut keep_pairs: Vec<(u128, u128)> = Vec::new();
+        let mut drop_pairs: Vec<(u128, u128)> = Vec::new();
+
+        let mut push_edge = |dst: &mut Vec<(u128, u128)>, e: EdgeSpec| {
+            if let (Some(u), Some(v)) = (e.u_id.as_deref(), e.v_id.as_deref()) {
+                if let (Ok(uu), Ok(vv)) = (u.parse::<u128>(), v.parse::<u128>()) {
+                    dst.push((uu, vv));
+                    return;
+                }
+            }
+            if let (Some(us), Some(vs)) = (e.u_seq.as_deref(), e.v_seq.as_deref()) {
+                let uu = self.encode(us);
+                let vv = self.encode(vs);
+                dst.push((uu, vv));
+            }
+        };
+
+        for e in rec.keep_edges {
+            push_edge(&mut keep_pairs, e);
+        }
+        for e in rec.drop_edges {
+            push_edge(&mut drop_pairs, e);
+        }
+
+        // 1) Apply explicit drops first.
+        for (u, v) in drop_pairs.iter().copied() {
+            if self.remove_edge(u, v) {
+                removed_total += 1;
+            }
+        }
+
+        if keep_pairs.is_empty() {
+            continue;
+        }
+
+        // Keep set for O(1) lookup
+        let mut keep_set: StdHashSet<(u128, u128)> = StdHashSet::new();
+        for &(u, v) in &keep_pairs {
+            keep_set.insert((u, v));
+        }
+
+        // If drop_edges were provided, we can expand bubble nodes using them as well (strong signal).
+        let mut bubble_seed: StdHashSet<u128> = StdHashSet::new();
+        for &(u, v) in &keep_pairs {
+            bubble_seed.insert(u);
+            bubble_seed.insert(v);
+        }
+        for (u, v) in drop_pairs.iter().copied() {
+            bubble_seed.insert(u);
+            bubble_seed.insert(v);
+        }
+        
+        // 2) If we did not get drop_edges, infer bubble boundary from kept path start/end.
+        // Build indeg/outdeg within the kept-edge subgraph.
+        let mut indeg_keep: HashMap<u128, usize> = HashMap::default();
+        let mut outdeg_keep: HashMap<u128, usize> = HashMap::default();
+        for &(u, v) in &keep_pairs {
+            *outdeg_keep.entry(u).or_default() += 1;
+            *indeg_keep.entry(v).or_default() += 1;
+            indeg_keep.entry(u).or_default();
+            outdeg_keep.entry(v).or_default();
+        }
+
+        // Identify start/end in the kept subgraph (a path). If ambiguous, fall back to seed-only trimming.
+        let starts: Vec<u128> = indeg_keep
+            .iter()
+            .filter_map(|(&n, &d)| if d == 0 { Some(n) } else { None })
+            .collect();
+        let ends: Vec<u128> = outdeg_keep
+            .iter()
+            .filter_map(|(&n, &d)| if d == 0 { Some(n) } else { None })
+            .collect();
+
+        // Max BFS radius: bubble depths are typically small; keep it conservative.
+        let max_steps: usize = 4 * self.k + 8;
+
+        let bubble_nodes: StdHashSet<u128> = if drop_pairs.is_empty() && starts.len() == 1 && ends.len() == 1 {
+            let start = starts[0];
+            let end = ends[0];
+
+            // Forward BFS from start
+            let mut fwd: StdHashSet<u128> = StdHashSet::new();
+            let mut q: VecDeque<(u128, usize)> = VecDeque::new();
+            fwd.insert(start);
+            q.push_back((start, 0));
+            while let Some((u, d)) = q.pop_front() {
+                if d >= max_steps {
+                    continue;
+                }
+                if let Some(succs) = self.edges.get(&u) {
+                    for &v in succs {
+                        if fwd.insert(v) {
+                            q.push_back((v, d + 1));
+                        }
+                    }
+                }
+            }
+
+            // Reverse BFS from end
+            let mut rev: StdHashSet<u128> = StdHashSet::new();
+            let mut rq: VecDeque<(u128, usize)> = VecDeque::new();
+            rev.insert(end);
+            rq.push_back((end, 0));
+            while let Some((u, d)) = rq.pop_front() {
+                if d >= max_steps {
+                    continue;
+                }
+                if let Some(ps) = pred.get(&u) {
+                    for &p in ps {
+                        if rev.insert(p) {
+                            rq.push_back((p, d + 1));
+                        }
+                    }
+                }
+            }
+
+            // Intersection (nodes that are "between" start and end within bounds)
+            fwd.into_iter().filter(|n| rev.contains(n)).collect()
+        } else {
+            // Fallback: only the nodes mentioned in keep/drop. This is safe but may be less aggressive.
+            bubble_seed
+        };
+
+        // 3) Collect internal edges and drop those not kept.
+        let mut internal_edges: Vec<(u128, u128)> = Vec::new();
+        for (&u, succs) in &self.edges {
+            if !bubble_nodes.contains(&u) {
+                continue;
+            }
+            for &v in succs {
+                if bubble_nodes.contains(&v) {
+                    internal_edges.push((u, v));
+                }
+            }
+        }
+
+        for (u, v) in internal_edges {
+            if !keep_set.contains(&(u, v)) {
+                if self.remove_edge(u, v) {
+                    removed_total += 1;
+                }
+            }
+        }
     }
+
+    self.normalize_nodes();
+    Ok(removed_total)
+}
 
     /// Remove a single directed edge `u -> v` and fix degree/count maps.
     fn remove_edge(&mut self, u: u128, v: u128) -> bool {
@@ -1022,7 +1053,7 @@ mod tests {
         // Minimalny JSON, który przejdzie przez parser:
         // BubbleChain { bubbles: [ Bubble { ends: [s,t], inside: [a,b] } ] }
         let json = format!(
-            "{{\"bubbles\":[{{\"ends\":[\"{}\",\"{}\"],\"inside\":[\"{}\",\"{}\"]}}]}}\n",
+            "[{{\"bubbles\":[{{\"ends\":[\"{}\",\"{}\"],\"inside\":[\"{}\",\"{}\"]}}]}}]\n",
             s, t, a, b
         );
 
