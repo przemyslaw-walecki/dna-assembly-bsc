@@ -3,7 +3,7 @@
 //! This module defines the `KmerGraph` struct, which represents a directed de Bruijn graph
 //! built from DNA sequencing reads. It supports graph construction, coverage-aware filtering,
 //! dead-end pruning, bubble removal (legacy, kept as dead code), exporting a GFA snapshot with
-//! per-node (KC) and per-edge (EC) coverages, and a new BubbleGun→GNN resolution pipeline.
+//! per-node (KC) and per-edge (EC) coverages, and a new BubbleGun->GNN resolution pipeline.
 //!
 //! # Overview
 //!
@@ -16,8 +16,8 @@
 //! # External pipeline (treated as black boxes here)
 //!
 //! 1) Write GFA: `KmerGraph::write_gfa`
-//! 2) Run BubbleGun on that GFA → bubbles JSONL (outside or via `std::process::Command` from main)
-//! 3) Run your Python GNN on BubbleGun’s JSONL → decisions JSONL
+//! 2) Run BubbleGun on that GFA -> bubbles JSONL (outside or via `std::process::Command` from main)
+//! 3) Run your Python GNN on BubbleGun’s JSONL -> decisions JSONL
 //! 4) Apply decisions: `KmerGraph::resolve_bubbles_from_jsonl`
 //!
 //! Expected decisions JSONL per line (flexible):
@@ -175,7 +175,7 @@ impl KmerGraph {
     /// Usuwa krótkie zakończenia (tips) o długości do `max_depth`.
     ///
     /// Zakończeniem jest węzeł o `out_degree = 0`.  
-    /// Jeśli prowadzi do niego łańcuch węzłów 1→1 o długości ≤ `max_depth`,
+    /// Jeśli prowadzi do niego łańcuch węzłów 1->1 o długości ≤ `max_depth`,
     /// cały łańcuch zostaje usunięty.
     pub fn remove_dead_ends(&mut self, max_depth: Option<usize>) {
         let max_depth = max_depth.unwrap_or(self.k);
@@ -202,7 +202,7 @@ impl KmerGraph {
                 let mut chain = vec![tip];
                 let mut curr = tip;
 
-                // Idziemy wstecz dopóki występuje unikalny poprzednik 1→1
+                // Idziemy wstecz dopóki występuje unikalny poprzednik 1->1
                 for _ in 0..depth {
                     let preds = pred
                         .get(&curr)
@@ -553,7 +553,7 @@ impl KmerGraph {
     }
 
     /// Resolve bubbles using only BubbleGun's JSON and coverage:
-    /// for each bubble, keep the start→end path with **maximum total EC** and
+    /// for each bubble, keep the start->end path with **maximum total EC** and
     /// drop all other internal edges-
     pub fn resolve_bubbles_by_coverage_from_bubblegun(
         &mut self,
@@ -681,7 +681,7 @@ impl KmerGraph {
                         }
                     }
                     if topo.len() != nodes.len() {
-                        // Cycle detected in bubble subgraph → leave it untouched.
+                        // Cycle detected in bubble subgraph -> leave it untouched.
                         continue;
                     }
 
@@ -718,7 +718,7 @@ impl KmerGraph {
                         continue;
                     }
 
-                    // Reconstruct best path start → end.
+                    // Reconstruct best path start -> end.
                     let mut path_nodes: Vec<u128> = Vec::new();
                     let mut cur = end;
                     path_nodes.push(cur);
@@ -772,4 +772,276 @@ impl KmerGraph {
     }
 
 
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::io::Write;
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn tmp_path(name: &str) -> PathBuf {
+        let mut p = std::env::temp_dir();
+        let ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        p.push(format!("kmer_graph_test_{}_{}_{}.tmp", name, std::process::id(), ts));
+        p
+    }
+
+    fn write_text(path: &PathBuf, content: &str) {
+        let mut f = fs::File::create(path).unwrap();
+        f.write_all(content.as_bytes()).unwrap();
+        f.flush().unwrap();
+    }
+
+    #[test]
+    fn encode_decode_roundtrip() {
+        let g = KmerGraph::new(5);
+        let s = "ACGTA";
+        let code = g.encode(s);
+        let back = g.decode(code);
+        assert_eq!(back, s);
+    }
+
+    #[test]
+    #[should_panic]
+    fn encode_panics_on_invalid_base() {
+        let g = KmerGraph::new(3);
+        // 'N' ma spowodować panic zgodnie z implementacją
+        let _ = g.encode("ACN");
+    }
+
+    #[test]
+    fn build_counts_nodes_edges_and_degrees() {
+        let mut g = KmerGraph::new(3);
+        let reads = vec!["ACGT".to_string()];
+        g.build(&reads);
+
+        let acg = g.encode("ACG");
+        let cgt = g.encode("CGT");
+
+        // węzły istnieją
+        assert!(g.edges.contains_key(&acg));
+        assert!(g.edges.contains_key(&cgt));
+
+        // jedna krawędź ACG -> CGT
+        assert_eq!(g.edge_count(), 1);
+        assert!(g.edges.get(&acg).unwrap().contains(&cgt));
+
+        // EC dla (ACG, CGT) = 1
+        assert_eq!(g.edge_counts.get(&(acg, cgt)).copied().unwrap_or(0), 1);
+
+        // KC: ACG i CGT pojawiają się po 1 razie w odczycie "ACGT"
+        assert_eq!(g.node_coverage.get(&acg).copied().unwrap_or(0), 1);
+        assert_eq!(g.node_coverage.get(&cgt).copied().unwrap_or(0), 1);
+
+        // stopnie
+        assert_eq!(g.out_degree.get(&acg).copied().unwrap_or(0), 1);
+        assert_eq!(g.in_degree.get(&cgt).copied().unwrap_or(0), 1);
+    }
+
+    #[test]
+    fn filter_low_coverage_removes_edges_and_updates_degrees() {
+        let mut g = KmerGraph::new(3);
+
+        let u = g.encode("AAA");
+        let v = g.encode("AAT");
+        g.edges.entry(u).or_default().insert(v);
+
+        g.out_degree.insert(u, 1);
+        g.in_degree.insert(v, 1);
+        g.in_degree.entry(u).or_insert(0);
+        g.out_degree.entry(v).or_insert(0);
+
+        g.edge_counts.insert((u, v), 1);
+        g.node_coverage.insert(u, 1);
+        g.node_coverage.insert(v, 1);
+
+        // prog 2 usuwa krawędź o EC=1
+        g.filter_low_coverage(2);
+
+        assert_eq!(g.edge_count(), 0);
+        assert!(!g.edges.get(&u).unwrap().contains(&v));
+        assert_eq!(g.edge_counts.get(&(u, v)).copied().unwrap_or(0), 0);
+        assert_eq!(g.out_degree.get(&u).copied().unwrap_or(0), 0);
+        assert_eq!(g.in_degree.get(&v).copied().unwrap_or(0), 0);
+    }
+
+    #[test]
+    fn remove_dead_ends_trims_simple_tip_chain() {
+        let mut g = KmerGraph::new(3);
+
+        // Prosty "tip": AAA -> AAT, gdzie AAT ma out_degree=0
+        let u = g.encode("AAA");
+        let v = g.encode("AAT");
+
+        g.edges.entry(u).or_default().insert(v);
+        g.edges.entry(v).or_default(); // v ma brak następców
+
+        g.out_degree.insert(u, 1);
+        g.in_degree.insert(v, 1);
+        g.in_degree.insert(u, 0);
+        g.out_degree.insert(v, 0);
+
+        g.edge_counts.insert((u, v), 10);
+        g.node_coverage.insert(u, 1);
+        g.node_coverage.insert(v, 1);
+
+        g.remove_dead_ends(Some(3));
+
+        // Po przycięciu nie powinno zostać żadnych krawędzi
+        assert_eq!(g.edge_count(), 0);
+        // i w szczególności nie powinno być u->v
+        if let Some(succs) = g.edges.get(&u) {
+            assert!(!succs.contains(&v));
+        }
+    }
+
+    #[test]
+    fn write_gfa_writes_header_segments_and_links_with_tags() {
+        let mut g = KmerGraph::new(3);
+        let reads = vec!["ACGT".to_string()];
+        g.build(&reads);
+
+        let path = tmp_path("graph.gfa");
+        g.write_gfa(path.to_str().unwrap()).unwrap();
+
+        let text = fs::read_to_string(&path).unwrap();
+        let _ = fs::remove_file(&path);
+
+        // Nagłówek
+        assert!(text.lines().any(|l| l.trim() == "H\tVN:Z:1.0"));
+
+        // Sekcje S z KC
+        assert!(text.lines().any(|l| l.starts_with("S\t") && l.contains("\tKC:i:")));
+
+        // Sekcje L z EC
+        assert!(text.lines().any(|l| l.starts_with("L\t") && l.contains("\tEC:i:")));
+    }
+
+    #[test]
+    fn resolve_bubbles_from_jsonl_keeps_only_specified_edges_inside_bubble() {
+        let mut g = KmerGraph::new(3);
+
+        // Zbuduj sztuczną "bańkę":
+        // s -> a -> t
+        // s -> b -> t
+        let s = g.encode("AAA");
+        let a = g.encode("AAT");
+        let b = g.encode("AAC");
+        let t = g.encode("TTT");
+
+        g.edges.entry(s).or_default().extend([a, b]);
+        g.edges.entry(a).or_default().insert(t);
+        g.edges.entry(b).or_default().insert(t);
+        g.edges.entry(t).or_default();
+
+        g.out_degree.insert(s, 2);
+        g.out_degree.insert(a, 1);
+        g.out_degree.insert(b, 1);
+        g.out_degree.insert(t, 0);
+
+        g.in_degree.insert(s, 0);
+        g.in_degree.insert(a, 1);
+        g.in_degree.insert(b, 1);
+        g.in_degree.insert(t, 2);
+
+        g.edge_counts.insert((s, a), 5);
+        g.edge_counts.insert((a, t), 5);
+        g.edge_counts.insert((s, b), 5);
+        g.edge_counts.insert((b, t), 5);
+
+        g.node_coverage.insert(s, 1);
+        g.node_coverage.insert(a, 1);
+        g.node_coverage.insert(b, 1);
+        g.node_coverage.insert(t, 1);
+
+        // keep_edges: tylko ścieżka s->a i a->t
+        let jsonl = format!(
+            "{{\"bubble_id\":1,\"keep_edges\":[{{\"u_id\":\"{}\",\"v_id\":\"{}\"}},{{\"u_id\":\"{}\",\"v_id\":\"{}\"}}]}}\n",
+            s, a, a, t
+        );
+
+        let path = tmp_path("decisions.jsonl");
+        write_text(&path, &jsonl);
+
+        let removed = g.resolve_bubbles_from_jsonl(path.to_str().unwrap()).unwrap();
+        let _ = fs::remove_file(&path);
+
+        // Powinno usunąć dwie krawędzie: s->b oraz b->t (wewnętrzne względem bubble_nodes)
+        assert_eq!(removed, 2);
+
+        assert!(g.edges.get(&s).unwrap().contains(&a));
+        assert!(g.edges.get(&a).unwrap().contains(&t));
+
+        assert!(!g.edges.get(&s).unwrap().contains(&b));
+        assert!(!g.edges.get(&b).unwrap().contains(&t));
+    }
+
+    #[test]
+    fn resolve_bubbles_by_coverage_from_bubblegun_keeps_max_ec_path() {
+        let mut g = KmerGraph::new(3);
+
+        // Bańka jak wyżej, ale EC różne, aby wybrać lepszą ścieżkę:
+        // s -> a -> t (EC=10 + 10 = 20)
+        // s -> b -> t (EC=1 + 1 = 2)
+        let s = g.encode("AAA");
+        let a = g.encode("AAT");
+        let b = g.encode("AAC");
+        let t = g.encode("TTT");
+
+        g.edges.entry(s).or_default().extend([a, b]);
+        g.edges.entry(a).or_default().insert(t);
+        g.edges.entry(b).or_default().insert(t);
+        g.edges.entry(t).or_default();
+
+        g.out_degree.insert(s, 2);
+        g.out_degree.insert(a, 1);
+        g.out_degree.insert(b, 1);
+        g.out_degree.insert(t, 0);
+
+        g.in_degree.insert(s, 0);
+        g.in_degree.insert(a, 1);
+        g.in_degree.insert(b, 1);
+        g.in_degree.insert(t, 2);
+
+        g.edge_counts.insert((s, a), 10);
+        g.edge_counts.insert((a, t), 10);
+        g.edge_counts.insert((s, b), 1);
+        g.edge_counts.insert((b, t), 1);
+
+        g.node_coverage.insert(s, 1);
+        g.node_coverage.insert(a, 1);
+        g.node_coverage.insert(b, 1);
+        g.node_coverage.insert(t, 1);
+
+        // Minimalny JSON, który przejdzie przez parser:
+        // BubbleChain { bubbles: [ Bubble { ends: [s,t], inside: [a,b] } ] }
+        let json = format!(
+            "{{\"bubbles\":[{{\"ends\":[\"{}\",\"{}\"],\"inside\":[\"{}\",\"{}\"]}}]}}\n",
+            s, t, a, b
+        );
+
+        let path = tmp_path("bubblegun.json");
+        write_text(&path, &json);
+
+        let removed = g
+            .resolve_bubbles_by_coverage_from_bubblegun(path.to_str().unwrap())
+            .unwrap();
+
+        let _ = fs::remove_file(&path);
+
+        // Powinno usunąć ścieżkę o gorszym EC: s->b i b->t
+        assert_eq!(removed, 2);
+
+        assert!(g.edges.get(&s).unwrap().contains(&a));
+        assert!(g.edges.get(&a).unwrap().contains(&t));
+
+        assert!(!g.edges.get(&s).unwrap().contains(&b));
+        assert!(!g.edges.get(&b).unwrap().contains(&t));
+    }
 }
