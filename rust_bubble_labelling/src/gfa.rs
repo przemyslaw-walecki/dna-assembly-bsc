@@ -122,3 +122,95 @@ pub fn build_adj(
 
     (succ, pred)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::path::PathBuf;
+
+    fn tmp_path(name: &str) -> PathBuf {
+        let mut p = std::env::temp_dir();
+        // dość unikatowo bez dodatkowych crate’ów
+        let pid = std::process::id();
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        p.push(format!("{}_{}_{}_{}.tmp", name, pid, nanos, "gfa"));
+        p
+    }
+
+    #[test]
+    fn parse_gfa_reads_segments_links_and_coverages_case_insensitive() {
+        let p = tmp_path("parse_gfa_basic");
+
+        // Uwaga: parser bierze:
+        // S: cols[1]=id, cols[2]=seq, pole KC:I:... (case-insensitive)
+        // L: cols[1]=from, cols[3]=to, pole EC:i:... (case-insensitive)
+        let gfa = "\
+S\t1\tACGT\tKC:i:7
+S\t2\tCGTA\tkc:I:9
+S\t3\tGTAA
+L\t1\t+\t2\t+\t0M\tEC:I:5
+L\t2\t+\t3\t+\t0M\tec:i:11
+";
+        fs::write(&p, gfa).unwrap();
+
+        let (segs, links, edge_cov) = parse_gfa(p.to_str().unwrap());
+
+        assert_eq!(segs.len(), 3);
+        assert_eq!(segs[&1].seq, "ACGT");
+        assert_eq!(segs[&1].cov, 7);
+        assert_eq!(segs[&2].cov, 9);
+        assert_eq!(segs[&3].cov, 0); // brak KC => 0
+
+        assert_eq!(links.len(), 2);
+        assert_eq!(links[0].from, 1);
+        assert_eq!(links[0].to, 2);
+        assert_eq!(links[0].cov, 5);
+        assert_eq!(links[1].cov, 11);
+
+        assert_eq!(edge_cov[&(1, 2)], 5);
+        assert_eq!(edge_cov[&(2, 3)], 11);
+
+        let _ = fs::remove_file(&p);
+    }
+
+    #[test]
+    fn build_adj_creates_succ_and_pred_for_all_nodes() {
+        let mut segs = HashMap::<u128, Segment>::new();
+        segs.insert(1, Segment { id: 1, seq: "AAA".into(), cov: 1 });
+        segs.insert(2, Segment { id: 2, seq: "AAT".into(), cov: 2 });
+        segs.insert(3, Segment { id: 3, seq: "ATG".into(), cov: 3 });
+
+        let links = vec![
+            Link { from: 1, to: 2, cov: 10 },
+            Link { from: 2, to: 3, cov: 20 },
+        ];
+
+        let (succ, pred) = build_adj(&segs, &links);
+
+        // wszystkie węzły obecne jako klucze
+        assert!(succ.contains_key(&1) && succ.contains_key(&2) && succ.contains_key(&3));
+        assert!(pred.contains_key(&1) && pred.contains_key(&2) && pred.contains_key(&3));
+
+        assert_eq!(succ[&1], vec![2]);
+        assert_eq!(succ[&2], vec![3]);
+        assert!(succ[&3].is_empty());
+
+        assert!(pred[&1].is_empty());
+        assert_eq!(pred[&2], vec![1]);
+        assert_eq!(pred[&3], vec![2]);
+    }
+
+    #[test]
+    #[should_panic]
+    fn parse_gfa_panics_on_non_numeric_segment_id() {
+        let p = tmp_path("parse_gfa_bad_id");
+        let gfa = "S\tabc\tACGT\tKC:i:1\n";
+        fs::write(&p, gfa).unwrap();
+
+        let _ = parse_gfa(p.to_str().unwrap());
+    }
+}

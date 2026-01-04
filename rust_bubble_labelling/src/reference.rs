@@ -178,3 +178,138 @@ pub fn minimal_unique_extension(
 
     None
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::path::PathBuf;
+
+    fn tmp_path(name: &str) -> PathBuf {
+        let mut p = std::env::temp_dir();
+        let pid = std::process::id();
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        p.push(format!("{}_{}_{}_{}.tmp", name, pid, nanos, "fa"));
+        p
+    }
+
+    #[test]
+    fn revcomp_basic_and_unknowns() {
+        assert_eq!(revcomp("ACGT"), "ACGT");
+        assert_eq!(revcomp("AAGT"), "ACTT");
+        assert_eq!(revcomp("NNX"), "NNN"); // X -> N
+    }
+
+    #[test]
+    fn load_fasta_reads_multiple_chroms_and_builds_rc() {
+        let p = tmp_path("load_fasta_multi");
+        let fa = "\
+>chr1
+ACGTACGT
+>chr2
+AAAAC
+";
+        fs::write(&p, fa).unwrap();
+
+        let r = RefText::load_fasta(p.to_str().unwrap());
+        assert_eq!(r.chroms.len(), 2);
+        assert_eq!(r.chroms[0].name, "chr1");
+        assert_eq!(r.chroms[0].seq, "ACGTACGT");
+        assert_eq!(r.chroms[0].rc_seq, revcomp("ACGTACGT"));
+
+        assert_eq!(r.chroms[1].name, "chr2");
+        assert_eq!(r.chroms[1].seq, "AAAAC");
+        assert_eq!(r.chroms[1].rc_seq, revcomp("AAAAC"));
+
+        let _ = fs::remove_file(&p);
+    }
+
+    #[test]
+    fn all_kmer_pos_finds_forward_and_reverse_complement_hits() {
+        let reftext = RefText {
+            chroms: vec![Chrom {
+                name: "chr1".into(),
+                seq: "ACGTACGT".into(),
+                rc_seq: revcomp("ACGTACGT"),
+            }],
+        };
+
+        let hits = all_kmer_pos(&reftext, "ACG");
+
+        let mut fwd: Vec<usize> = hits.iter().filter(|p| !p.rev).map(|p| p.pos).collect();
+        fwd.sort_unstable();
+        assert_eq!(fwd, vec![0, 4]);
+
+        let mut rev: Vec<usize> = hits.iter().filter(|p| p.rev).map(|p| p.pos).collect();
+        rev.sort_unstable();
+        assert_eq!(rev, vec![1, 5]);
+    }
+
+    #[test]
+    fn minimal_unique_extension_returns_none_even_if_kmer_is_unique_on_forward_due_to_rev_hits() {
+        // W tej implementacji: jeśli k-mer występuje na forward,
+        // to all_kmer_pos() zwykle znajdzie też odpowiadające wystąpienie na rc_seq (rev=true),
+        // więc MUE nie zwróci Some(0, ..) tylko None.
+        let reftext = RefText {
+            chroms: vec![Chrom {
+                name: "c".into(),
+                seq: "AAACAAA".into(), // "ACA" na forward jest raz
+                rc_seq: revcomp("AAACAAA"), // ale rc(kmer) pojawia się też w rc_seq
+            }],
+        };
+
+        assert!(minimal_unique_extension(&reftext, "ACA", true, 10).is_none());
+    }
+
+    #[test]
+    fn minimal_unique_extension_can_become_unique_when_one_strand_cannot_extend_further() {
+        // seq = "ACAAA"
+        // kmer = "ACA" występuje na forward przy pos=0
+        // rc_seq = revcomp("ACAAA") = "TTTGT"
+        // rc(kmer) = "TGT" występuje w rc_seq przy pos=2
+        //
+        // Dla extend_right i ext=1:
+        // - forward: potrzebuje bazy na pos 0+3 = 3 -> istnieje
+        // - rev: potrzebuje bazy na pos 2+3 = 5 -> poza zakresem, więc odpada
+        // Zostaje jedno wystąpienie => Some(ext=1, forward-pos0)
+        let reftext = RefText {
+            chroms: vec![Chrom {
+                name: "c".into(),
+                seq: "ACAAA".into(),
+                rc_seq: revcomp("ACAAA"),
+            }],
+        };
+
+        let res = minimal_unique_extension(&reftext, "ACA", true, 5);
+        assert!(res.is_some());
+
+        let (ext, pos) = res.unwrap();
+        assert_eq!(ext, 1);
+        assert_eq!(pos.chrom, 0);
+        assert_eq!(pos.rev, false);
+        assert_eq!(pos.pos, 0);
+    }
+
+    #[test]
+    fn minimal_unique_extension_can_eliminate_candidates_when_extension_out_of_bounds() {
+        let reftext = RefText {
+            chroms: vec![Chrom {
+                name: "c".into(),
+                seq: "ACAAA".into(),
+                rc_seq: revcomp("ACAAA"),
+            }],
+        };
+    
+        let res = minimal_unique_extension(&reftext, "ACA", true, 5);
+        assert!(res.is_some());
+    
+        let (ext, pos) = res.unwrap();
+        assert_eq!(ext, 1);
+        assert_eq!(pos.chrom, 0);
+        assert_eq!(pos.rev, false);
+        assert_eq!(pos.pos, 0);
+    }
+}

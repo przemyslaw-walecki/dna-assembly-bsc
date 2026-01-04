@@ -1509,3 +1509,248 @@ pub fn build_record_json(
 
     Some(serde_json::to_string(&rec).unwrap())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::gfa::Segment;
+    use std::collections::{HashMap, HashSet};
+    use std::fs;
+    use std::path::PathBuf;
+
+    fn tmp_path(name: &str) -> PathBuf {
+        let mut p = std::env::temp_dir();
+        let pid = std::process::id();
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        p.push(format!("{}_{}_{}_{}.tmp", name, pid, nanos, "json"));
+        p
+    }
+
+    #[test]
+    fn parse_u128_ok_and_panics_on_bad() {
+        assert_eq!(parse_u128("123"), 123u128);
+    }
+
+    #[test]
+    #[should_panic]
+    fn parse_u128_panics_on_non_numeric() {
+        let _ = parse_u128("abc");
+    }
+
+    #[test]
+    fn canonical_picks_lexicographically_smaller_between_seq_and_rc() {
+        // rc("TTAC") = "GTAA"
+        // min lexicograficznie: "GTAA" < "TTAC"
+        assert_eq!(canonical("TTAC"), "GTAA");
+        // palindrom / już mniejsze
+        assert_eq!(canonical("ACGT"), "ACGT");
+    }
+
+    #[test]
+    fn append_next_kmer_appends_forward_or_reverse_complement_if_overlap_matches() {
+        let k = 4;
+        let mut assembled = "ACGT".to_string();
+
+        // next "CGTA" overlap "CGT" => dokleja 'A'
+        assert!(append_next_kmer(&mut assembled, "CGTA", k));
+        assert_eq!(assembled, "ACGTA");
+
+        // teraz suffix (k-1)= "GTA"
+        // podajemy next jako reverse-complement pasujący lepiej:
+        // jeśli next_seq="TACG", rc = "CGTA", pref "CGT" nie pasuje do "GTA",
+        // ale rc pref "CGT" też nie pasuje, więc false.
+        assert!(!append_next_kmer(&mut assembled, "TACG", k));
+    }
+
+    #[test]
+    fn assemble_chain_sequence_builds_sequence_or_none_if_inconsistent() {
+        let mut segments = HashMap::<u128, Segment>::new();
+        // k=4, łańcuch ACGT -> CGTA -> GTAC => "ACGTAC"
+        segments.insert(1, Segment { id: 1, seq: "ACGT".into(), cov: 1 });
+        segments.insert(2, Segment { id: 2, seq: "CGTA".into(), cov: 1 });
+        segments.insert(3, Segment { id: 3, seq: "GTAC".into(), cov: 1 });
+
+        let seq = assemble_chain_sequence(&[1, 2, 3], &segments, 4).unwrap();
+        assert_eq!(seq, "ACGTAC");
+
+        // niespójny k-mer
+        segments.insert(4, Segment { id: 4, seq: "AAAA".into(), cov: 1 });
+        assert!(assemble_chain_sequence(&[1, 4], &segments, 4).is_none());
+    }
+
+    #[test]
+    fn compact_with_chains_compacts_linear_1_to_1_runs() {
+        // graf: 1 -> 2 -> 3 -> 4, gdzie 2 i 3 są 1->1
+        let nodes: HashSet<u128> = [1, 2, 3, 4].into_iter().collect();
+
+        let mut succ: HashMap<u128, Vec<u128>> = HashMap::new();
+        let mut pred: HashMap<u128, Vec<u128>> = HashMap::new();
+        succ.insert(1, vec![2]);
+        succ.insert(2, vec![3]);
+        succ.insert(3, vec![4]);
+        succ.insert(4, vec![]);
+        pred.insert(1, vec![]);
+        pred.insert(2, vec![1]);
+        pred.insert(3, vec![2]);
+        pred.insert(4, vec![3]);
+
+        let mut segments = HashMap::<u128, Segment>::new();
+        for (id, cov) in [(1, 10), (2, 20), (3, 30), (4, 40)] {
+            segments.insert(id, Segment { id, seq: format!("S{id}"), cov });
+        }
+
+        // EC podane tylko dla części, reszta fallback na min(KC_u, KC_v)
+        let mut edge_cov = HashMap::<(u128, u128), usize>::new();
+        edge_cov.insert((1, 2), 7);
+        // (2,3) brak -> min(20,30)=20
+        edge_cov.insert((3, 4), 9);
+
+        let (edges, supernodes) = compact_with_chains(&nodes, &succ, &pred, &edge_cov, &segments);
+
+        // supernodes: węzły, które nie są 1->1: 1 (indeg=0), 4 (outdeg=0)
+        assert!(supernodes.contains(&1));
+        assert!(supernodes.contains(&4));
+
+        // powinien powstać unitig startujący w 1 i kończący w 4: [1,2,3,4]
+        let e = edges.iter().find(|e| e.from == 1 && e.to == 4).expect("missing 1->4 superedge");
+        assert_eq!(e.chain, vec![1, 2, 3, 4]);
+
+        // cov_min = min( EC(1,2)=7, fallback(2,3)=20, EC(3,4)=9 ) => 7
+        assert_eq!(e.cov_min, 7);
+        // mean = (7 + 20 + 9)/3
+        let expected_mean = (7.0 + 20.0 + 9.0) / 3.0;
+        assert!((e.cov_mean - expected_mean).abs() < 1e-9);
+    }
+
+    #[test]
+    fn split_edges_at_splits_only_when_node_is_in_the_middle() {
+        let e = SuperEdge {
+            from: 1,
+            to: 4,
+            chain: vec![1, 2, 3, 4],
+            cov_min: 5,
+            cov_mean: 6.0,
+        };
+
+        // split at 3 -> [1,2,3] and [3,4]
+        let out = split_edges_at(3, &[e.clone()]);
+        assert_eq!(out.len(), 2);
+
+        let left = out.iter().find(|x| x.to == 3).unwrap();
+        let right = out.iter().find(|x| x.from == 3).unwrap();
+
+        assert_eq!(left.chain, vec![1, 2, 3]);
+        assert_eq!(right.chain, vec![3, 4]);
+
+        // split at endpoint -> unchanged
+        let out2 = split_edges_at(1, &[e.clone()]);
+        assert_eq!(out2.len(), 1);
+        assert_eq!(out2[0].chain, vec![1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn count_bubbles_file_counts_multiple_json_shapes() {
+        let p = tmp_path("count_bubbles_shapes");
+
+        // 3 linie:
+        // 1) obiekt mapujący do BubbleChain
+        // 2) tablica BubbleChain
+        // 3) tablica Bubble
+        let jsonl = r#"
+{"x":{"bubbles":[{"id":1,"ends":["1","2"],"inside":["3"]},{"id":2,"ends":["2","4"],"inside":[]}]}}
+[{"bubbles":[{"id":3,"ends":["5","6"],"inside":["7","8"]}]}]
+[{"id":4,"ends":["9","10"],"inside":[]},{"id":5,"ends":["11","12"],"inside":["13"]}]
+"#;
+        fs::write(&p, jsonl.trim()).unwrap();
+
+        let n = count_bubbles_file(p.to_str().unwrap());
+        assert_eq!(n, 2 + 1 + 2);
+
+        let _ = fs::remove_file(&p);
+    }
+
+    #[test]
+    fn select_inside_nodes_meta_prefers_branch_or_articulation_and_limits_top_k() {
+        // Zbuduj mały bąbel:
+        // start=1, end=6
+        // wewnątrz: 2,3,4,5
+        //
+        // krawędzie (skierowane):
+        // 1->2, 2->3, 3->6
+        // 2->4, 4->5, 5->3
+        //
+        // W induced grafie:
+        // - 2 ma outdeg=2 (branch)
+        // - 3 ma indeg=2 (branch)
+        // - 4/5 są na cyklu bocznym; 2 i 3 często wyjdą wysoko.
+        let start = 1u128;
+        let end = 6u128;
+
+        let original_inside: HashSet<u128> = [2, 3, 4, 5].into_iter().collect();
+        let induced_nodes: HashSet<u128> = [1, 2, 3, 4, 5, 6].into_iter().collect();
+
+        let mut succ: HashMap<u128, Vec<u128>> = HashMap::new();
+        let mut pred: HashMap<u128, Vec<u128>> = HashMap::new();
+
+        let edges = vec![
+            (1, 2),
+            (2, 3),
+            (3, 6),
+            (2, 4),
+            (4, 5),
+            (5, 3),
+        ];
+
+        for (u, v) in edges {
+            succ.entry(u).or_default().push(v);
+            pred.entry(v).or_default().push(u);
+            succ.entry(v).or_default();
+            pred.entry(u).or_default();
+        }
+
+        let mut segments = HashMap::<u128, Segment>::new();
+        for id in [1u128, 2, 3, 4, 5, 6] {
+            segments.insert(
+                id,
+                Segment {
+                    id,
+                    seq: format!("K{id}"),
+                    cov: match id {
+                        2 => 100, // podbij pokrycie dla kontrastu
+                        3 => 5,
+                        _ => 10,
+                    },
+                },
+            );
+        }
+
+        let out = select_inside_nodes_meta(
+            start,
+            end,
+            &original_inside,
+            &induced_nodes,
+            &succ,
+            &pred,
+            &segments,
+            2, // top_k
+        );
+
+        assert_eq!(out.len(), 2);
+
+        // powinny to być węzły z original_inside (bez start/end)
+        for f in &out {
+            assert!(f.seq == "K2" || f.seq == "K3" || f.seq == "K4" || f.seq == "K5");
+        }
+
+        // sprawdź, że przynajmniej jeden jest rozgałęzieniem (2 lub 3)
+        assert!(out.iter().any(|f| f.is_branch));
+
+        // spójność pól
+        for f in &out {
+            assert!(f.centrality_hint >= 0.0);
+        }
+    }
+}
