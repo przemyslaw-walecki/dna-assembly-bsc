@@ -1,0 +1,2 @@
+variant,acc_dec_mean,precision_dec_mean,recall_dec_mean,f1_dec_mean,acc_bub_mean,params,decisions,bubbles
+emb8_g16_e256_mean,0.6084959816303099,0.6101327257306283,0.9989046552770454,0.7570273652938345,0.5829274544988464,10569,4355,3901
