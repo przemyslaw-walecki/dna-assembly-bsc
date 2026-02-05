@@ -1,11 +1,47 @@
+"""
+Moduł odpowiedzialny za składanie kontigów na podstawie grafu de Bruijna.
+
+Zawiera klasę :class:`Assembler`, która przetwarza oczyszczony graf k-merów
+i odtwarza sekwencje DNA poprzez odnajdywanie maksymalnych ścieżek
+niebranchujących (segmentów 1→1). Każda taka ścieżka jest dekodowana do
+ciągu nukleotydów i zapisywana jako kontig.
+"""
+
+
 class Assembler:
+    """
+    Prosty assembler kontigów działający na grafie de Bruijna.
+
+    Algorytm wyszukuje wszystkie maksymalne ścieżki, w których każdy węzeł
+    wewnętrzny ma dokładnie jeden poprzednik i jednego następnika. Pierwszy
+    k-mer w ścieżce jest dekodowany w całości, a każdy kolejny k-mer
+    wydłuża sekwencję o jedną zasadę.
+    """
+
     def __init__(self, graph):
         """
-        Walk non-1->1 regions to extract contigs.
+        Inicjalizuje assembler.
+
+        Argumenty:
+            graph: Oczyszczony graf de Bruijna zawierający:
+                - `edges`: mapowanie węzeł → zbiór następców,
+                - `in_degree`: liczba krawędzi wchodzących,
+                - `out_degree`: liczba krawędzi wychodzących,
+                - `_decode(int) -> str`: metodę dekodującą k-mery.
         """
         self.graph = graph
 
     def assemble_contigs(self):
+        """
+        Składa kontigi poprzez przechodzenie maksymalnych ścieżek niebranchujących.
+
+        Każda ścieżka zaczyna się w węźle, który nie ma stopnia wejścia = 1
+        lub stopnia wyjścia = 1. Następnie ścieżka jest wydłużana, dopóki
+        kolejne węzły spełniają warunek 1→1.
+
+        Zwraca:
+            list[str]: Lista zrekonstruowanych kontigów.
+        """
         contigs = []
         visited = set()
         for u, succs in self.graph.edges.items():

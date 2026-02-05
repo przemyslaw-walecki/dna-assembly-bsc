@@ -1,4 +1,4 @@
-//! Command-line interface for the AI DNA assembler.
+//! Interfejs wiersza poleceń dla assemblera AI DNA.
 //!
 //! This binary now supports an external bubble-resolution pipeline:
 //!   1) export GFA
@@ -25,27 +25,31 @@ use std::process::Command;
 /// Command-line arguments for the assembler.
 #[derive(Parser)]
 struct Args {
-    /// Path to the first FASTQ file (`-1`)
+    /// Ścieżka do pierwszego pliku FASTQ (`-1`)
     #[clap(short = '1')]
     reads1: String,
 
-    /// Path to the second FASTQ file (`-2`)
+    /// Ścieżka do drugiego pliku FASTQ (`-2`)
     #[clap(short = '2')]
     reads2: String,
 
-    /// Length of k-mers to use in the de Bruijn graph (`-k`)
+    /// Długość k-mera wykorzystywana w grafie de Bruijna (`-k`)
     #[clap(short, long, default_value = "55")]
     kmer: usize,
 
-    /// Minimum edge count to retain in the graph (`-t`)
+    /// Minimalne pokrycie krawędzi, które pozostaje w grafie (`-t`)
     #[clap(short, long, default_value = "0")]
     threshold: usize,
 
-    /// Maximum depth for dead-end pruning (`-d`)
+    /// Maksymalna głębokość usuwania zakończeń (`-d`)
     #[clap(short = 'd', long, default_value = "5")]
     depth: usize,
 
-    /// Output FASTA for assembled contigs (`-o`)
+    /// Maksymalna głębokość usuwania bąbli (`-b`)
+    #[clap(short = 'b', long, default_value = "20")]
+    bubble_depth: usize,
+
+    /// Nazwa pliku wynikowego (`-o`)
     #[clap(short = 'o', long, default_value = "assembled.fa")]
     output: String,
 
@@ -163,7 +167,7 @@ fn run_gnn_script(
     }
 }
 
-/// Main entry point for the assembler pipeline.
+/// Główna funkcja pipeline'u assemblera.
 ///
 /// Pipeline:
 ///   - load FASTQs

@@ -9,6 +9,7 @@ import torch.nn.functional as F
 from torch.utils.data import Dataset
 from torch_geometric.data import Data
 from torch_geometric.loader import DataLoader
+from torch_geometric.nn import GCNConv
 
 # --------------------------
 # Utilities / tokenization
@@ -18,11 +19,25 @@ NUC2ID = {'A': 1, 'C': 2, 'G': 3, 'T': 4, 'N': 5}
 ID2NUC = {v: k for k, v in NUC2ID.items()}
 
 def seq_to_tokens(seq: str) -> torch.LongTensor:
+    # NOTE: 0 is reserved as "padding", but here we don't pad; values are in {1..5}
     return torch.tensor([NUC2ID.get(c, 5) for c in seq], dtype=torch.long)
 
 def _safe_get(d: Dict[str, Any], key: str, default):
     v = d.get(key, default)
     return default if v is None else v
+
+def tokens_to_onehot(tokens: torch.LongTensor, num_classes: int = 6) -> torch.Tensor:
+    """
+    DML-friendly one-hot via broadcasting.
+    tokens: [N, K] long
+    returns: [N, K, num_classes] float
+    """
+    if tokens.numel() == 0:
+        # preserve shape for empty graphs
+        return tokens.new_zeros((*tokens.shape, num_classes), dtype=torch.float32)
+
+    classes = torch.arange(num_classes, device=tokens.device, dtype=tokens.dtype).view(1, 1, num_classes)
+    return (tokens.unsqueeze(-1) == classes).to(torch.float32)
 
 # --------------------------
 # Dataset for BubbleGun JSONL
@@ -35,7 +50,7 @@ class BubbleGunBubbleDataset(Dataset):
       - Graph GFA (from Rust assembler) for seq + coverage + adjacency
 
     For each bubble:
-      - nodes = inside -a endpoints
+      - nodes = inside + endpoints
       - node features: seq_tokens, KC coverage
       - edges = all graph edges u->v where u,v are in that node set
       - edge features: [len_nodes=1, len_bp=k, cov_min=EC, cov_mean=EC, on_ref=0]
@@ -87,7 +102,6 @@ class BubbleGunBubbleDataset(Dataset):
                     self.adj.setdefault(u, []).append((v, float(ec)))
 
         if self.k == 0 and self.node_seq:
-            # Fallback: take length of any seq
             self.k = len(next(iter(self.node_seq.values())))
 
         # --- parse BubbleGun JSON/JSONL into bubbles ---
@@ -150,7 +164,6 @@ class BubbleGunBubbleDataset(Dataset):
         for nid in node_ids:
             seq = self.node_seq.get(nid)
             if seq is None:
-                # if BubbleGun refers to node missing from GFA, skip this node
                 continue
             local_idx = len(node_seqs)
             id_to_local[nid] = local_idx
@@ -160,7 +173,6 @@ class BubbleGunBubbleDataset(Dataset):
 
         n_nodes = len(node_seqs)
         if n_nodes == 0:
-            # empty graph, but keep record shape consistent
             data = Data(
                 seq_tokens=torch.zeros((0, 1), dtype=torch.long),
                 x_cov=torch.zeros((0, 1), dtype=torch.float32),
@@ -185,7 +197,6 @@ class BubbleGunBubbleDataset(Dataset):
                     continue
                 u_idx = id_to_local[u]
                 v_idx = id_to_local[v]
-                # len_nodes=1, len_bp=k, cov_min=cov_mean=EC, on_ref=0
                 edge_src.append(u_idx)
                 edge_dst.append(v_idx)
                 edge_attr.append([1.0, float(self.k), ec, ec, 0.0])
@@ -197,8 +208,8 @@ class BubbleGunBubbleDataset(Dataset):
             edge_index = torch.zeros((2, 0), dtype=torch.long)
             edge_attr_t = torch.zeros((0, 5), dtype=torch.float32)
 
-        seq_tokens = torch.stack([seq_to_tokens(s) for s in node_seqs], dim=0)
-        x_cov = torch.tensor(node_covs, dtype=torch.float32).unsqueeze(1)
+        seq_tokens = torch.stack([seq_to_tokens(s) for s in node_seqs], dim=0)  # [N,K]
+        x_cov = torch.tensor(node_covs, dtype=torch.float32).unsqueeze(1)       # [N,1]
 
         data = Data(
             seq_tokens=seq_tokens,
@@ -212,126 +223,91 @@ class BubbleGunBubbleDataset(Dataset):
         data.k = self.k
         return data
 
-
 # --------------------------
-# Model
+# Model (NEW): CNN(one-hot) + 2xGCNConv + edge MLP
 # --------------------------
-
-class DenseGCNLayer(nn.Module):
-    def __init__(self, in_dim, out_dim):
-        super().__init__()
-        self.lin = nn.Linear(in_dim, out_dim)
-
-    def forward(self, H, edge_index_local, n_nodes: int):
-        if n_nodes == 0:
-            return H
-        A = H.new_zeros((n_nodes, n_nodes))
-        if edge_index_local.numel() > 0:
-            src, dst = edge_index_local
-            one = torch.ones_like(src, dtype=H.dtype)
-            A.index_put_((src, dst), one, accumulate=True)
-        idx = torch.arange(n_nodes, device=H.device)
-        try:
-            A[idx, idx] += 1
-        except Exception:
-            flat = A.view(-1)
-            diag_idx = torch.arange(0, n_nodes*n_nodes, step=n_nodes+1, device=H.device)
-            flat.index_add_(0, diag_idx, torch.ones(n_nodes, device=H.device, dtype=H.dtype))
-            A = flat.view(n_nodes, n_nodes)
-        deg = A.sum(dim=1) + 1e-8
-        D_inv_sqrt = deg.pow(-0.5)
-        A_norm = (D_inv_sqrt[:, None] * A) * D_inv_sqrt[None, :]
-        return A_norm @ self.lin(H)
 
 class HyperbubbleGNN(nn.Module):
+    """
+    CNN-based sequence encoder + 2× GCNConv + MLP edge classifier.
+    Matches your new architecture (one-hot -> Conv1d -> pooling -> concat cov).
+    """
     def __init__(
         self,
-        vocab_size=6,
-        embed_dim=16,
-        gcn_hidden=16,
-        edge_hidden=16,
-        edge_feat_dim=5,
-        use_lstm=False,
+        vocab_size: int = 6,     # 0..5, where 1..5 used for A,C,G,T,N
+        cnn_channels: int = 32,
+        gcn_hidden: int = 64,
+        edge_hidden: int = 64,
+        edge_feat_dim: int = 5,
+        dropout: float = 0.0,
     ):
         super().__init__()
-        self.embed = nn.Embedding(vocab_size, embed_dim, padding_idx=0)
-        self.use_lstm = use_lstm
-        if use_lstm:
-            self.lstm = nn.LSTM(embed_dim, gcn_hidden // 2, batch_first=True, bidirectional=False)
-            self.node_in = gcn_hidden + 1
-        else:
-            self.node_in = embed_dim + 1
 
-        self.gcn_hidden = gcn_hidden
-        self.gcn1 = DenseGCNLayer(self.node_in, gcn_hidden)
-        self.gcn2 = DenseGCNLayer(gcn_hidden, gcn_hidden)
+        self.vocab_size = vocab_size
+        self.cnn_channels = cnn_channels
+        self.edge_feat_dim = edge_feat_dim
+
+        self.cnn = nn.Conv1d(vocab_size, cnn_channels, kernel_size=3, padding=1)
+        self.node_in = cnn_channels + 1
+
+        self.gcn1 = GCNConv(self.node_in, gcn_hidden)
+        self.gcn2 = GCNConv(gcn_hidden, gcn_hidden)
+
+        self.dropout = nn.Dropout(dropout)
 
         self.edge_mlp = nn.Sequential(
             nn.Linear(2 * gcn_hidden + edge_feat_dim, edge_hidden),
             nn.ReLU(),
+            nn.Dropout(dropout),
             nn.Linear(edge_hidden, 1),
         )
 
-    def encode_nodes(self, seq_tokens, x_cov):
-        E = self.embed(seq_tokens)
-        mask = (seq_tokens != 0).float().unsqueeze(-1)
-        if self.use_lstm:
-            lengths = mask.squeeze(-1).sum(dim=1).clamp(min=1).long()
-            H0, _ = self.lstm(E)
-            Hseq = (H0 * mask).sum(dim=1) / lengths.clamp(min=1).unsqueeze(-1).float()
-        else:
-            lengths = mask.squeeze(-1).sum(dim=1).clamp(min=1)
-            Hseq = (E * mask).sum(dim=1) / lengths.unsqueeze(-1)
-        X = torch.cat([Hseq, x_cov], dim=1)
-        return X
+    def encode_nodes(self, seq_tokens: torch.Tensor, x_cov: torch.Tensor) -> torch.Tensor:
+        """
+        seq_tokens: [N,K] long
+        x_cov:      [N,1] float
+        returns:    [N, cnn_channels+1]
+        """
+        if seq_tokens.numel() == 0:
+            return x_cov.new_zeros((0, self.cnn_channels + 1))
 
-    def forward(self, data: Data):
-        device = data.seq_tokens.device
-        N = data.num_nodes
+        onehot = tokens_to_onehot(seq_tokens, num_classes=self.vocab_size)  # [N,K,V]
+        x = onehot.permute(0, 2, 1)                                        # [N,V,K]
+
+        h = F.relu(self.cnn(x))                                            # [N,C,K]
+        h = h.mean(dim=2)                                                  # [N,C]
+        return torch.cat([h, x_cov], dim=1)                                # [N,C+1]
+
+    def forward(self, data: Data) -> torch.Tensor:
+        """
+        returns logits [E] (one per edge in data.edge_index)
+        """
+        X0 = self.encode_nodes(data.seq_tokens, data.x_cov)  # [N,node_in]
+
+        if data.num_nodes == 0:
+            return X0.new_zeros((0,))
+
+        # Node propagation on sparse edge_index
+        H = F.relu(self.gcn1(X0, data.edge_index))
+        H = self.dropout(H)
+        H = F.relu(self.gcn2(H, data.edge_index))
+        H = self.dropout(H)
+
         E = data.edge_index.size(1)
-        X0 = self.encode_nodes(data.seq_tokens, data.x_cov)
-
-        out_node = X0.new_zeros((N, self.gcn_hidden))
-        batch_vec = data.batch if hasattr(data, "batch") else torch.zeros(N, dtype=torch.long, device=device)
-        num_graphs = int(batch_vec.max().item()) + 1 if N > 0 else 0
-
-        for g in range(num_graphs):
-            node_ids = (batch_vec == g).nonzero(as_tuple=False).view(-1)
-            n_nodes = int(node_ids.numel())
-            if n_nodes == 0:
-                continue
-
-            local_map = torch.full((N,), -1, dtype=torch.long, device=device)
-            local_map[node_ids] = torch.arange(n_nodes, device=device, dtype=torch.long)
-
-            ei = data.edge_index
-            keep = (local_map[ei[0]] >= 0) & (local_map[ei[1]] >= 0)
-            keep_idx = keep.nonzero(as_tuple=False).view(-1)
-
-            if keep_idx.numel() == 0:
-                H = F.relu(self.gcn1(X0[node_ids], torch.empty(2,0,device=device,dtype=torch.long), n_nodes=n_nodes))
-                H = F.relu(self.gcn2(H,          torch.empty(2,0,device=device,dtype=torch.long), n_nodes=n_nodes))
-                out_node[node_ids] = H
-                continue
-
-            src_local = local_map[ei[0, keep_idx]]
-            dst_local = local_map[ei[1, keep_idx]]
-            edge_local = torch.stack([src_local, dst_local], dim=0)
-
-            H = F.relu(self.gcn1(X0[node_ids], edge_local, n_nodes))
-            H = F.relu(self.gcn2(H,            edge_local, n_nodes))
-            out_node[node_ids] = H
-
         if E == 0:
-            return torch.empty((0,), device=device)
+            return H.new_zeros((0,))
 
         u, v = data.edge_index
-        U = out_node[u]
-        V = out_node[v]
-        EA = data.edge_attr if hasattr(data, "edge_attr") and data.edge_attr.numel() > 0 \
-             else out_node.new_zeros((E, 5))
-        feats = torch.cat([U, V, EA], dim=1)
-        logits = self.edge_mlp(feats).squeeze(-1)  # [E]
+        U = H[u]
+        V = H[v]
+
+        if hasattr(data, "edge_attr") and data.edge_attr.numel() > 0:
+            EA = data.edge_attr
+        else:
+            EA = H.new_zeros((E, self.edge_feat_dim))
+
+        feats = torch.cat([U, V, EA], dim=1)                 # [E, 2*gcn_hidden + edge_feat_dim]
+        logits = self.edge_mlp(feats).squeeze(-1)            # [E]
         return logits
 
 # --------------------------
@@ -350,7 +326,7 @@ def infer_and_emit(
     For each bubble graph:
       - score edges
       - for every source node with >=2 outgoing edges, keep only argmax(logit)
-      - optionally keep edges from sources with a single outgoing edge (usually helpful)
+      - optionally keep edges from sources with a single outgoing edge
       - write one JSON record per bubble:
           { "bubble_id": ..., "keep_edges": [ {"u_seq":..., "v_seq":...}, ... ] }
     """
@@ -359,8 +335,8 @@ def infer_and_emit(
         for batch in loader:
             batch = batch.to(device)
             logits = model(batch)
+
             if logits.numel() == 0:
-                # still emit empty decision objects for consistency
                 _emit_empty_decisions(batch, fh)
                 continue
 
@@ -370,23 +346,17 @@ def infer_and_emit(
             edge_batch = node_batch[u] if u.numel() else torch.zeros((0,), dtype=torch.long, device=device)
             num_graphs = int(node_batch.max().item()) + 1 if batch.num_nodes > 0 else 0
 
-            # split by graph
             for g in range(num_graphs):
                 g_edge_idx = (edge_batch == g).nonzero(as_tuple=False).view(-1)
                 if g_edge_idx.numel() == 0:
-                    rec = {
-                        "bubble_id": _safe_get_attr(batch, "bubble_id", g),
-                        "keep_edges": []
-                    }
+                    rec = {"bubble_id": _safe_get_attr(batch, "bubble_id", g), "keep_edges": []}
                     fh.write(json.dumps(rec) + "\n")
                     continue
 
-                # For decision points: group edges by same source node
                 src_nodes = u[g_edge_idx]
                 dst_nodes = v[g_edge_idx]
                 edge_scores = logits[g_edge_idx]
 
-                # Build groups { source_node_idx -> [(edge_idx_in_g_edge_idx, score), ...] }
                 groups: Dict[int, List[Tuple[int, float]]] = {}
                 for i in range(g_edge_idx.numel()):
                     s = int(src_nodes[i].item())
@@ -395,14 +365,11 @@ def infer_and_emit(
                 keep_pairs: List[Tuple[int, int]] = []
                 for s, items in groups.items():
                     if len(items) >= 2:
-                        # choose best
                         best_local_idx = max(items, key=lambda t: t[1])[0]
                         keep_pairs.append((s, int(dst_nodes[best_local_idx].item())))
                     elif keep_all_sinks and len(items) == 1:
-                        # keep lone edge if requested
                         keep_pairs.append((s, int(dst_nodes[items[0][0]].item())))
 
-                # map node indices back to sequences
                 node_seqs = _node_seqs_for_graph(batch, g)
                 keep_edges_json = []
                 for (s_idx, t_idx) in keep_pairs:
@@ -410,7 +377,6 @@ def infer_and_emit(
                         u_seq = node_seqs[s_idx]
                         v_seq = node_seqs[t_idx]
                     except Exception:
-                        # fallback: skip if indices out of range
                         continue
                     keep_edges_json.append({"u_seq": u_seq, "v_seq": v_seq})
 
@@ -423,7 +389,6 @@ def infer_and_emit(
 def _safe_get_attr(batch: Data, name: str, default_val):
     try:
         val = getattr(batch, name)
-        # If batched tensors, we can't reliably split without extra bookkeeping; use default.
         if isinstance(val, torch.Tensor):
             return default_val
         return val
@@ -431,14 +396,11 @@ def _safe_get_attr(batch: Data, name: str, default_val):
         return default_val
 
 def _node_seqs_for_graph(batch: Data, g: int) -> List[str]:
-
     device = batch.seq_tokens.device
     node_batch = batch.batch if hasattr(batch, "batch") else torch.zeros(batch.num_nodes, dtype=torch.long, device=device)
-
     node_ids = (node_batch == g).nonzero(as_tuple=False).view(-1)
 
     ns = batch.node_seqs
-
     if not ns:
         return []
 
@@ -458,7 +420,6 @@ def _node_seqs_for_graph(batch: Data, g: int) -> List[str]:
             continue
         out.append(flat[gi])
     return out
-
 
 def _emit_empty_decisions(batch: Data, fh):
     device = batch.seq_tokens.device
@@ -485,24 +446,18 @@ def load_device(use_directml: bool, force_cpu: bool) -> torch.device:
         return torch.device("cuda")
     return torch.device("cpu")
 
-def load_model(ckpt_path: Path, device: torch.device, use_lstm: bool = False) -> nn.Module:
+def load_model(ckpt_path: Path, device: torch.device) -> nn.Module:
     model = HyperbubbleGNN(
-        vocab_size=5,
-        embed_dim=16,
-        gcn_hidden=64,
-        edge_hidden=64,
+        vocab_size=6,
+        cnn_channels=8,
+        gcn_hidden=16,
+        edge_hidden=256,
         edge_feat_dim=5,
-        use_lstm=use_lstm,
+        dropout=0.0,
     ).to(device)
 
-    # Accept both formats:
-    #   1) {"state_dict": <...>, ...}
-    #   2) raw state_dict
     ckpt = torch.load(ckpt_path, map_location="cpu")
-    if isinstance(ckpt, dict) and "state_dict" in ckpt:
-        state_dict = ckpt["state_dict"]
-    else:
-        state_dict = ckpt
+    state_dict = ckpt["state_dict"] if isinstance(ckpt, dict) and "state_dict" in ckpt else ckpt
     model.load_state_dict(state_dict, strict=False)
     model.eval()
     return model
@@ -516,14 +471,12 @@ def main():
     ap.add_argument("--num-workers", type=int, default=0, help="DataLoader workers.")
     ap.add_argument("--directml", action="store_true", help="Use DirectML if available.")
     ap.add_argument("--cpu", action="store_true", help="Force CPU.")
-    ap.add_argument("--use-lstm", action="store_true", help="Use LSTM token encoder (must match training).")
     ap.add_argument("--gfa", required=True, help="GFA graph used with BubbleGun JSON to map node IDs to k-mers.")
     args = ap.parse_args()
 
     device = load_device(use_directml=args.directml, force_cpu=args.cpu)
-    model = load_model(Path(args.ckpt), device=device, use_lstm=args.use_lstm)
+    model = load_model(Path(args.ckpt), device=device)
 
-    # Build graphs directly from BubbleGun JSON + GFA
     ds = BubbleGunBubbleDataset(args.inp, args.gfa)
     loader = DataLoader(ds, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers)
 

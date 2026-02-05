@@ -1,6 +1,6 @@
 #!/bin/sh
 
-GFA_DIR="../rust_basic_dna_assembler/gfa_out"
+GFA_DIR="../rust_basic_dna_assembler/ecoli_gfa_out/ecoli_added"
 
 echo "[*] Szukanie plików .gfa w $GFA_DIR"
 

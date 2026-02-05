@@ -1,0 +1,4 @@
+ecoli_variant,test_acc_bub,test_precision_dec,test_recall_dec,test_f1_dec
+ecoli_variant1,0.4760178,0.520476,0.9980008,0.6841514
+ecoli_variant2,0.535514,0.5659152,0.9984732,0.7223354
+ecoli_variant3,0.5131736,0.540965,0.9959076,0.7010552

@@ -12,4 +12,4 @@ docs/static
 *.json
 *.jsonl
 *.pth
-*.csv
+*.fasta

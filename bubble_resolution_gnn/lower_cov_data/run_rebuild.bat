@@ -1,0 +1,1 @@
+python3 .\rebuild_dataset_all_edges.py --old .\Cronobacter_dataset_cov20_ratio_lt_3.5.jsonl --gfa ..\..\rust_basic_dna_assembler\gfa_out\Cronobacter.gfa --bubbles ..\..\rust_basic_dna_assembler\gfa_out\Cronobacter_bubbles.json --out .\Cronobacter_dataset_cov20_ratio_lt_3.5_all_edges.jsonl

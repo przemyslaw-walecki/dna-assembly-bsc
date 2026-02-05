@@ -1,6 +1,12 @@
-# Random Genome Generator & Sequencer
+# Generator losowego genomu i symulator sekwencjonowania
 
-Simple python random genome generator and a deterministic sequencer for the purposes of testing assembly implementation.
+Ten moduł zawiera:
+- prosty generator losowego genomu,  
+- deterministyczny symulator sekwencjonowania (odczyty o stałej długości, bez błędów).
+
+Narzędzie służy do testowania i walidacji działania assemblerów, zarówno pythonowych, jak i rustowych.
+
+Pełna dokumentacja API znajduje się poniżej:
 
 ::: random_genome_generator
     options:

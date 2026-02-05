@@ -300,7 +300,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "rust_basic_dna_assembler"
+name = "rust_bubble_labelling"
 version = "0.1.0"
 dependencies = [
  "aho-corasick",

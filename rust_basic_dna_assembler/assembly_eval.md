@@ -24,3 +24,93 @@
 | --- | --- | --- | --- | --- | --- | --- |
 | Salmonella_enterica_subsp_enterica_serovar_Typhimurium_str_LT2.fasta | ai_assembled_salmonella_k21_cov20.fa | 10581 | 6156 | 58.2 | 1573.6 | 0.14 |
 | Salmonella_enterica_subsp_enterica_serovar_Typhimurium_str_LT2.fasta | heurstic_assembled_salmonella_k21_cov20.fa | 9416 | 5088 | 54.0 | 1905.1 | 0.14 |
+
+### Minimap2 Assembly Comparison
+
+**Reference genome:** `Escherichia_coli_str_K-12_substr_MG1655.fasta`
+
+| Reference | Assembly | Total | Aligned | % Aligned | Avg Len | Avg MM |
+| --- | --- | --- | --- | --- | --- | --- |
+| Escherichia_coli_str_K-12_substr_MG1655.fasta | ai_assembled_ecoli_k21_cov20_04_01.fa | 11373 | 5979 | 52.6 | 1524.6 | 0.19 |
+| Escherichia_coli_str_K-12_substr_MG1655.fasta | heurstic_assembled_ecoli_k21_cov20_04_01.fa | 10175 | 4923 | 48.4 | 1843.4 | 0.25 |
+
+### Minimap2 Assembly Comparison
+
+**Reference genome:** `Escherichia_coli_str_K-12_substr_MG1655.fasta`
+
+| Reference | Assembly | Total | Aligned | % Aligned | Avg Len | Avg MM |
+| --- | --- | --- | --- | --- | --- | --- |
+| Escherichia_coli_str_K-12_substr_MG1655.fasta | ai_assembled_ecoli_k21_cov20_04_01.fa | 11373 | 5979 | 52.6 | 1524.6 | 0.19 |
+| Escherichia_coli_str_K-12_substr_MG1655.fasta | heurstic_assembled_ecoli_k21_cov20_04_01.fa | 10175 | 4923 | 48.4 | 1843.4 | 0.25 |
+
+### Minimap2 Assembly Comparison
+
+**Reference genome:** `Klebsiella_pneumoniae_subsp_pneumoniae_NTUH-K2044_DNA.fasta`
+
+| Reference | Assembly | Total | Aligned | % Aligned | Avg Len | Avg MM |
+| --- | --- | --- | --- | --- | --- | --- |
+| Klebsiella_pneumoniae_subsp_pneumoniae_NTUH-K2044_DNA.fasta | ai_assembled_klebsiella_k21_cov20_04_01.fa | 11975 | 7098 | 59.3 | 1479.6 | 0.07 |
+| Klebsiella_pneumoniae_subsp_pneumoniae_NTUH-K2044_DNA.fasta | heurstic_assembled_klebsiella_k21_cov20_04_01.fa | 11015 | 6231 | 56.6 | 1677.9 | 0.09 |
+
+### Minimap2 Assembly Comparison
+
+**Reference genome:** `Proteus-mirabilis.fasta`
+
+| Reference | Assembly | Total | Aligned | % Aligned | Avg Len | Avg MM |
+| --- | --- | --- | --- | --- | --- | --- |
+| Proteus-mirabilis.fasta | ai_assembled_proteus_k21_cov20_04_01.fa | 7759 | 4676 | 60.3 | 1564.5 | 0.22 |
+| Proteus-mirabilis.fasta | heurstic_assembled_proteus_k21_cov20_04_01.fa | 6637 | 3679 | 55.4 | 2029.5 | 0.16 |
+
+### Minimap2 Assembly Comparison
+
+**Reference genome:** `Proteus-mirabilis.fasta`
+
+| Reference | Assembly | Total | Aligned | % Aligned | Avg Len | Avg MM |
+| --- | --- | --- | --- | --- | --- | --- |
+| Proteus-mirabilis.fasta | ai_assembled_proteus_k21_cov20_04_01.fa | 7753 | 4664 | 60.2 | 1567.5 | 0.22 |
+| Proteus-mirabilis.fasta | heurstic_assembled_proteus_k21_cov20_04_01.fa | 6637 | 3679 | 55.4 | 2029.5 | 0.16 |
+
+### Minimap2 Assembly Comparison
+
+**Reference genome:** `Proteus-mirabilis.fasta`
+
+| Reference | Assembly | Total | Aligned | % Aligned | Avg Len | Avg MM |
+| --- | --- | --- | --- | --- | --- | --- |
+| Proteus-mirabilis.fasta | ai_assembled_proteus_k21_cov20_04_01.fa | 7760 | 4672 | 60.2 | 1568.2 | 0.22 |
+| Proteus-mirabilis.fasta | heurstic_assembled_proteus_k21_cov20_04_01.fa | 6637 | 3679 | 55.4 | 2029.5 | 0.16 |
+
+### Minimap2 Assembly Comparison
+
+**Reference genome:** `Salmonella_enterica_subsp_enterica_serovar_Typhimurium_str_LT2.fasta`
+
+| Reference | Assembly | Total | Aligned | % Aligned | Avg Len | Avg MM |
+| --- | --- | --- | --- | --- | --- | --- |
+| Salmonella_enterica_subsp_enterica_serovar_Typhimurium_str_LT2.fasta | ai_assembled_salmonella_k21_cov20_04_01.fa | 10588 | 6179 | 58.4 | 1573.5 | 0.14 |
+| Salmonella_enterica_subsp_enterica_serovar_Typhimurium_str_LT2.fasta | heurstic_assembled_salmonella_k21_cov20_04_01.fa | 9416 | 5088 | 54.0 | 1905.1 | 0.14 |
+
+### Minimap2 Assembly Comparison
+
+**Reference genome:** `Salmonella_enterica_subsp_enterica_serovar_Typhimurium_str_LT2.fasta`
+
+| Reference | Assembly | Total | Aligned | % Aligned | Avg Len | Avg MM |
+| --- | --- | --- | --- | --- | --- | --- |
+| Salmonella_enterica_subsp_enterica_serovar_Typhimurium_str_LT2.fasta | ai_assembled_salmonella_k21_cov20_04_01.fa | 10588 | 6179 | 58.4 | 1573.5 | 0.14 |
+| Salmonella_enterica_subsp_enterica_serovar_Typhimurium_str_LT2.fasta | heurstic_assembled_salmonella_k21_cov20_04_01.fa | 9416 | 5088 | 54.0 | 1905.1 | 0.14 |
+
+### Minimap2 Assembly Comparison
+
+**Reference genome:** `Salmonella_enterica_subsp_enterica_serovar_Typhimurium_str_LT2.fasta`
+
+| Reference | Assembly | Total | Aligned | % Aligned | Avg Len | Avg MM |
+| --- | --- | --- | --- | --- | --- | --- |
+| Salmonella_enterica_subsp_enterica_serovar_Typhimurium_str_LT2.fasta | ai_assembled_salmonella_k21_cov20_04_01.fa | 10588 | 6179 | 58.4 | 1573.5 | 0.14 |
+| Salmonella_enterica_subsp_enterica_serovar_Typhimurium_str_LT2.fasta | heurstic_assembled_salmonella_k21_cov20_04_01.fa | 9416 | 5088 | 54.0 | 1905.1 | 0.14 |
+
+### Minimap2 Assembly Comparison
+
+**Reference genome:** `Salmonella_enterica_subsp_enterica_serovar_Typhimurium_str_LT2.fasta`
+
+| Reference | Assembly | Total | Aligned | % Aligned | Avg Len | Avg MM |
+| --- | --- | --- | --- | --- | --- | --- |
+| Salmonella_enterica_subsp_enterica_serovar_Typhimurium_str_LT2.fasta | ai_assembled_salmonella_k21_cov20_04_01.fa | 10588 | 6179 | 58.4 | 1573.5 | 0.14 |
+| Salmonella_enterica_subsp_enterica_serovar_Typhimurium_str_LT2.fasta | heurstic_assembled_salmonella_k21_cov20_04_01.fa | 9416 | 5088 | 54.0 | 1905.1 | 0.14 |

@@ -1,3 +1,16 @@
+"""
+Główny moduł uruchamiający podstawowy assembler DNA w Pythonie.
+
+Realizuje pipeline:
+1. Wczytanie odczytów z dwóch plików FASTQ.
+2. Zbudowanie grafu de Bruijna dla zadanej długości k-merów.
+3. Filtrowanie krawędzi o niskim pokryciu.
+4. Usuwanie krótkich zakończeń (tips).
+5. Usuwanie prostych baniek.
+6. Składanie kontigów.
+7. Zapis wyników do pliku FASTA w katalogu `./data`.
+"""
+
 import argparse
 import os
 from src.basic_dna_assembler.fastq_parser import FastqParser
@@ -6,24 +19,30 @@ from src.basic_dna_assembler.assembler import Assembler
 
 
 def main():
+    """
+    Uruchamia assembler na podstawie argumentów wiersza poleceń.
+
+    Obsługiwane opcje:
+        -1 / --reads1  : plik FASTQ z pierwszymi końcami odczytów,
+        -2 / --reads2  : plik FASTQ z drugimi końcami,
+        -k / --kmer    : długość k-mera,
+        -t / --threshold : minimalne pokrycie krawędzi,
+        -d / --depth   : maksymalna długość usuwanych zakończeń,
+        -o / --output  : nazwa pliku wynikowego FASTA.
+
+    Zwraca:
+        Plik FASTA z kontigami zapisany w `./data/`.
+    """
     p = argparse.ArgumentParser(
-        description="De Bruijn-based assembler using two FASTQ files"
+        description="Assembler genomowy oparty na grafie de Bruijna."
     )
-    p.add_argument("-1", "--reads1", required=True, help="First-end FASTQ file")
-    p.add_argument("-2", "--reads2", required=True, help="Second-end FASTQ file")
-    p.add_argument("-k", "--kmer", type=int, default=55, help="k-mer size")
-    p.add_argument(
-        "-t", "--threshold", type=int, default=5, help="Min edge coverage to keep"
-    )
-    p.add_argument(
-        "-o",
-        "--output",
-        default="assembled.fa",
-        help="Output FASTA filename (written into ./data/)",
-    )
-    p.add_argument(
-        "-d", "--depth", type=int, default=5, help="Depth of dead ends to remove"
-    )
+    p.add_argument("-1", "--reads1", required=True)
+    p.add_argument("-2", "--reads2", required=True)
+    p.add_argument("-k", "--kmer", type=int, default=55)
+    p.add_argument("-t", "--threshold", type=int, default=5)
+    p.add_argument("-o", "--output", default="assembled.fa")
+    p.add_argument("-d", "--depth", type=int, default=5)
+
     args = p.parse_args()
 
     reads1 = FastqParser(args.reads1).load_reads()
@@ -43,7 +62,7 @@ def main():
         for i, c in enumerate(contigs, start=1):
             f.write(f">contig_{i}\n{c}\n")
 
-    print(f"Wrote {len(contigs)} contigs to {out_path}")
+    print(f"Zapisano {len(contigs)} kontigów do {out_path}")
 
 
 if __name__ == "__main__":

@@ -1,0 +1,3 @@
+reference,assembly,total,aligned,pct_aligned,avg_len,avg_mm
+Escherichia_coli_str_K-12_substr_MG1655.fasta,ai_assembled_ecoli_k21_cov20_04_01.fa,11373,5979,52.6,1524.6,0.19
+Escherichia_coli_str_K-12_substr_MG1655.fasta,heurstic_assembled_ecoli_k21_cov20_04_01.fa,10175,4923,48.4,1843.4,0.25
