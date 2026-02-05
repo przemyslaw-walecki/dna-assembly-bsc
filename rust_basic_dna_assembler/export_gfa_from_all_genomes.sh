@@ -2,8 +2,8 @@
 set -euo pipefail
 
 ASSEMBLER="./target/release/rust_basic_dna_assembler"
-READ_DIR="../genomes"
-OUT_DIR="./gfa_out"
+READ_DIR="../genomes/ecoli_variants/ecoli_variants_added"
+OUT_DIR="./ecoli_gfa_out"
 K=21
 
 mkdir -p "$OUT_DIR"

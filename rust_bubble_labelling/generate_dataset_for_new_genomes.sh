@@ -5,9 +5,9 @@ set -e
 # Build assembler
 cargo build --release
 
-GFA_DIR="../rust_basic_dna_assembler/gfa_out"
-REF_DIR="../genomes"
-OUT_DIR="./datasets"
+GFA_DIR="../rust_basic_dna_assembler/ecoli_gfa_out/ecoli_added"
+REF_DIR="../genomes/ecoli_variants/ecoli_variants_added"
+OUT_DIR="./datasets/ecoli_variants/ecoli_added"
 
 mkdir -p "$OUT_DIR"
 
@@ -16,13 +16,9 @@ echo "[*] Szukam grafów w: $GFA_DIR"
 # Mapowanie nazwa -> nazwa referencyjnego FASTA
 declare -A REF_MAP
 
-# REF_MAP["Bacillus"]="Bacillus-subtilis.fasta"
-# REF_MAP["Citrobacter"]="Citrobacter-freundii.fasta"
-#REF_MAP["Cronobacter"]="Cronobacter-sakazakii.fasta"
-#REF_MAP["Haemophilus"]="Haemophilus-influenzae.fasta"
-#REF_MAP["Morganella"]="Morganella-morganii.fasta"
-#REF_MAP["Proteus"]="Proteus-mirabilis.fasta"
-REF_MAP["Serratia"]="Serratia-marcescens.fasta"
+
+REF_MAP["ecoli_variant4"]="Ecoli_variant4.fasta"
+REF_MAP["ecoli_variant5"]="Ecoli_variant5.fasta"
 
 echo "[*] Rozpoczynam generowanie datasetów…"
 
@@ -30,7 +26,7 @@ for gfa in "$GFA_DIR"/*.gfa; do
     base=$(basename "$gfa" .gfa)
 
     # pierwszy człon przed _
-    species=$(echo "$base" | cut -d'_' -f1)
+    species="${base#*_*_}"
 
     echo ""
     echo "[*] Przetwarzam: $gfa (gatunek = $species)"
@@ -65,7 +61,7 @@ for gfa in "$GFA_DIR"/*.gfa; do
 
     # run dataset builder
     RUST_MIN_STACK=33554432 RAYON_NUM_THREADS=4 \
-     ./target/release/rust_basic_dna_assembler \
+     ./target/release/rust_bubble_labelling \
         "$gfa" "$bubbles_json" "$ref_path" "$out_jsonl"
 
 done

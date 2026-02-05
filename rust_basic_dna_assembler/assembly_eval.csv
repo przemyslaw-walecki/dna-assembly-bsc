@@ -1,3 +1,3 @@
 reference,assembly,total,aligned,pct_aligned,avg_len,avg_mm
-Escherichia_coli_str_K-12_substr_MG1655.fasta,ai_assembled_ecoli_k21_cov20.fa,11379,5969,52.5,1537.8,0.17
-Escherichia_coli_str_K-12_substr_MG1655.fasta,heurstic_assembled_ecoli_k21_cov20.fa,10175,4923,48.4,1843.4,0.25
+Salmonella_enterica_subsp_enterica_serovar_Typhimurium_str_LT2.fasta,ai_assembled_salmonella_k21_cov20_04_01.fa,10588,6179,58.4,1573.5,0.14
+Salmonella_enterica_subsp_enterica_serovar_Typhimurium_str_LT2.fasta,heurstic_assembled_salmonella_k21_cov20_04_01.fa,9416,5088,54.0,1905.1,0.14

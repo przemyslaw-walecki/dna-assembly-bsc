@@ -1,3 +1,3 @@
  #!/bin/sh
 
-BubbleGun -g ./ecoli_21_graph.gfa bchains --bubble_json ecoli_k21_bubbles.json
+BubbleGun -g ./gfa_out/proteus_k21_cov30_graph.gfa bchains --bubble_json ./gfa_out/proteus_k21_cov30_bubbles.json
